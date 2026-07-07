@@ -1,62 +1,40 @@
-"""차트 생성 및 분석.
+"""차트 생성 및 분석 (Plotly 인터랙티브).
 
-- 일봉 차트: 캔들 + 이평선(5,20) + 거래량 + 외인/기관/개인 누적 순매수(보조패널)
-- 1분봉 차트: 캔들 + 이평선 + 거래량 + '1천만원 최적 단타 구간' 음영 하이라이트
-- 결과 PNG: outputs/[종목명]/[날짜]_분석.png
+- 일봉: 캔들 + 이평선(5,20) + 거래량 + 외인/기관/개인 누적 순매수
+- 1분봉: 캔들 + 이평선 + 거래량 + '1천만원 최적 단타 구간' 하이라이트
+- 분석 데이터는 CSV 로 저장(outputs/[종목명]/[날짜]_min.csv) → 역추적 시 인터랙티브 재생성
+- hover 툴팁 / 확대·축소 / 구간 포커스는 Plotly 기본 제공
 """
 import math
 import re
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")  # Streamlit/headless 환경용 (GUI 없이 파일 저장)
-import matplotlib.font_manager as fm
-import matplotlib.pyplot as plt
 import pandas as pd
-import mplfinance as mpf
-
-# 한글 폰트 (윈도우: 맑은 고딕 / 맥: AppleGothic / 나눔). 설치된 것 중 첫 번째 사용.
-_available = {f.name for f in fm.fontManager.ttflist}
-_FONT = next(
-    (f for f in ("Malgun Gothic", "AppleGothic", "NanumGothic", "MS Gothic") if f in _available),
-    "DejaVu Sans",
-)
-matplotlib.rcParams["font.family"] = _FONT
-matplotlib.rcParams["axes.unicode_minus"] = False
-
-# mplfinance 스타일(yahoo)이 폰트를 덮어쓰므로, 한글 폰트를 rc 로 주입한 커스텀 스타일 사용
-_STYLE = mpf.make_mpf_style(
-    base_mpf_style="yahoo",
-    rc={"font.family": _FONT, "axes.unicode_minus": False},
-)
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 _OUTPUT_ROOT = Path(__file__).resolve().parent.parent / "outputs"
 CAPITAL = 10_000_000  # 단타 분석 기준 투자금 (1,000만 원)
 
+_UP, _DOWN = "#e03131", "#1c7ed6"  # 한국식: 상승=빨강, 하락=파랑
 
-# ---- 공통 유틸 -----------------------------------------------------------
+
 def _safe_dir(name: str) -> str:
-    """폴더명으로 못 쓰는 문자 제거."""
     return re.sub(r'[\\/:*?"<>|]', "_", name).strip() or "unknown"
 
 
-def output_path(name: str, date: str) -> Path:
+def data_path(name: str, date: str) -> Path:
     d = _OUTPUT_ROOT / _safe_dir(name)
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{date}_분석.png"
+    return d / f"{date}_min.csv"
 
 
 # ---- 데이터 → DataFrame --------------------------------------------------
 def daily_to_df(rows: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(rows).rename(
         columns={
-            "stck_bsop_date": "Date",
-            "stck_oprc": "Open",
-            "stck_hgpr": "High",
-            "stck_lwpr": "Low",
-            "stck_clpr": "Close",
-            "acml_vol": "Volume",
+            "stck_bsop_date": "Date", "stck_oprc": "Open", "stck_hgpr": "High",
+            "stck_lwpr": "Low", "stck_clpr": "Close", "acml_vol": "Volume",
         }
     )
     df["Date"] = pd.to_datetime(df["Date"], format="%Y%m%d")
@@ -66,15 +44,10 @@ def daily_to_df(rows: list[dict]) -> pd.DataFrame:
 
 
 def minute_to_df(rows: list[dict], date: str) -> pd.DataFrame:
-    """1분봉 rows → DataFrame. date='YYYYMMDD'."""
     df = pd.DataFrame(rows).rename(
         columns={
-            "stck_cntg_hour": "Time",
-            "stck_oprc": "Open",
-            "stck_hgpr": "High",
-            "stck_lwpr": "Low",
-            "stck_prpr": "Close",
-            "cntg_vol": "Volume",
+            "stck_cntg_hour": "Time", "stck_oprc": "Open", "stck_hgpr": "High",
+            "stck_lwpr": "Low", "stck_prpr": "Close", "cntg_vol": "Volume",
         }
     )
     df["Date"] = pd.to_datetime(date + df["Time"], format="%Y%m%d%H%M%S")
@@ -84,15 +57,12 @@ def minute_to_df(rows: list[dict], date: str) -> pd.DataFrame:
 
 
 def investor_to_df(rows: list[dict]) -> pd.DataFrame:
-    """투자자매매동향 → 날짜 인덱스, 외인/기관/개인 순매수 수량."""
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows).rename(
         columns={
-            "stck_bsop_date": "Date",
-            "frgn_ntby_qty": "외국인",
-            "orgn_ntby_qty": "기관",
-            "prsn_ntby_qty": "개인",
+            "stck_bsop_date": "Date", "frgn_ntby_qty": "외국인",
+            "orgn_ntby_qty": "기관", "prsn_ntby_qty": "개인",
         }
     )
     if "Date" not in df:
@@ -103,99 +73,164 @@ def investor_to_df(rows: list[dict]) -> pd.DataFrame:
     return df.set_index("Date").sort_index()[["외국인", "기관", "개인"]]
 
 
-# ---- 최적 단타 구간 분석 --------------------------------------------------
-def optimal_daytrade(df_min: pd.DataFrame, capital: int = CAPITAL) -> dict | None:
-    """당일 1분봉에서 '한 번 매수→한 번 매도'로 수익이 최대가 되는 구간을 찾는다.
+# ---- 저장 / 로드 (역추적용) ----------------------------------------------
+def save_minute_data(name: str, date: str, df: pd.DataFrame) -> Path:
+    p = data_path(name, date)
+    df.to_csv(p, encoding="utf-8-sig")
+    return p
 
-    (사후 최적해: 복기용. 실매매 신호가 아님)
-    반환: buy/sell 위치·가격·수량·수익금·수익률, 없으면 None.
-    """
+
+def load_minute_data(name: str, date: str) -> pd.DataFrame | None:
+    p = data_path(name, date)
+    if not p.exists():
+        return None
+    try:
+        return pd.read_csv(p, index_col=0, parse_dates=True)
+    except Exception:
+        return None
+
+
+# ---- 단타 분석 ------------------------------------------------------------
+def optimal_daytrade(df_min: pd.DataFrame, capital: int = CAPITAL) -> dict | None:
+    """구간 내 '한 번 매수→한 번 매도' 최대수익 (사후 최적해, 복기용)."""
     closes = df_min["Close"].tolist()
     if len(closes) < 2:
         return None
-
-    min_pos = 0
-    best = None  # (profit_per_share, buy_pos, sell_pos)
+    min_pos, best = 0, None
     for j in range(len(closes)):
         gain = closes[j] - closes[min_pos]
         if best is None or gain > best[0]:
             best = (gain, min_pos, j)
         if closes[j] < closes[min_pos]:
             min_pos = j
-
-    profit_per_share, buy_pos, sell_pos = best
-    if profit_per_share <= 0 or buy_pos == sell_pos:
-        return None  # 당일 상승 구간 없음
-
-    buy_price = closes[buy_pos]
-    sell_price = closes[sell_pos]
-    shares = math.floor(capital / buy_price)
-    if shares <= 0:
+    _, buy_pos, sell_pos = best
+    if buy_pos == sell_pos or closes[sell_pos] <= closes[buy_pos]:
         return None
-    profit_amt = shares * (sell_price - buy_price)
-    ret_pct = (sell_price - buy_price) / buy_price * 100
+    return _trade(df_min, buy_pos, sell_pos, capital)
+
+
+def simulate(df_min: pd.DataFrame, buy_pos: int, sell_pos: int, capital: int = CAPITAL) -> dict:
+    """사용자 지정 매수/매도 위치로 손익 계산."""
+    return _trade(df_min, buy_pos, sell_pos, capital)
+
+
+def _trade(df: pd.DataFrame, buy_pos: int, sell_pos: int, capital: int) -> dict:
+    buy_price = float(df["Close"].iloc[buy_pos])
+    sell_price = float(df["Close"].iloc[sell_pos])
+    shares = math.floor(capital / buy_price) if buy_price > 0 else 0
+    profit = shares * (sell_price - buy_price)
+    ret = (sell_price - buy_price) / buy_price * 100 if buy_price else 0.0
     return {
-        "buy_pos": buy_pos,
-        "sell_pos": sell_pos,
-        "buy_time": df_min.index[buy_pos],
-        "sell_time": df_min.index[sell_pos],
-        "buy_price": buy_price,
-        "sell_price": sell_price,
-        "shares": shares,
-        "profit_amt": profit_amt,
-        "ret_pct": ret_pct,
+        "buy_pos": buy_pos, "sell_pos": sell_pos,
+        "buy_time": df.index[buy_pos], "sell_time": df.index[sell_pos],
+        "buy_price": buy_price, "sell_price": sell_price,
+        "shares": shares, "cost": shares * buy_price,
+        "profit_amt": profit, "ret_pct": ret,
     }
 
 
-# ---- 차트 렌더링 ----------------------------------------------------------
-def render_daily_chart(name: str, code: str, df: pd.DataFrame,
-                       investor: pd.DataFrame, save_to: Path) -> Path:
-    """일봉 캔들 + 이평 + 거래량 + 수급 보조패널."""
-    apds = []
-    if not investor.empty:
-        inv = investor.reindex(df.index).fillna(0).cumsum()  # 누적 순매수 추이
-        apds = [
-            mpf.make_addplot(inv["외국인"], panel=2, color="red", ylabel="누적수급"),
-            mpf.make_addplot(inv["기관"], panel=2, color="green"),
-            mpf.make_addplot(inv["개인"], panel=2, color="blue"),
-        ]
-    fig, _ = mpf.plot(
-        df, type="candle", style=_STYLE, mav=(5, 20), volume=True,
-        addplot=apds, returnfig=True, figsize=(11, 7),
-        title=f"\n{name}({code}) 일봉  |  외인(빨강)/기관(초록)/개인(파랑) 누적순매수",
+# ---- Plotly 차트 ----------------------------------------------------------
+def _ma(series: pd.Series, n: int) -> pd.Series:
+    return series.rolling(n).mean()
+
+
+def build_minute_figure(name: str, code: str, date: str,
+                        df: pd.DataFrame, trade: dict | None) -> go.Figure:
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.04, row_heights=[0.75, 0.25])
+    fig.add_trace(
+        go.Candlestick(
+            x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+            name="가격", increasing_line_color=_UP, decreasing_line_color=_DOWN,
+        ),
+        row=1, col=1,
     )
-    fig.savefig(save_to, dpi=100, bbox_inches="tight")
-    plt.close(fig)
-    return save_to
-
-
-def render_minute_chart(name: str, code: str, date: str, df_min: pd.DataFrame,
-                        trade: dict | None, save_to: Path) -> Path:
-    """1분봉 캔들 + 이평 + 거래량 + 최적 단타 구간 하이라이트. save_to 로 저장."""
-    if trade:
-        title = (
-            f"\n{name}({code}) {date} 1분봉  |  "
-            f"최적 단타 수익률 {trade['ret_pct']:+.2f}%  "
-            f"수익금 {trade['profit_amt']:,.0f}원 (1천만원 기준)"
+    for n, color in [(5, "orange"), (20, "purple")]:
+        fig.add_trace(
+            go.Scatter(x=df.index, y=_ma(df["Close"], n), name=f"MA{n}",
+                       line=dict(width=1, color=color)),
+            row=1, col=1,
         )
+    vol_colors = [_UP if c >= o else _DOWN for o, c in zip(df["Open"], df["Close"])]
+    fig.add_trace(
+        go.Bar(x=df.index, y=df["Volume"], marker_color=vol_colors, name="거래량",
+               showlegend=False),
+        row=2, col=1,
+    )
+
+    if trade:
+        fig.add_vrect(x0=trade["buy_time"], x1=trade["sell_time"],
+                      fillcolor="gold", opacity=0.18, line_width=0, row=1, col=1)
+        fig.add_trace(
+            go.Scatter(x=[trade["buy_time"]], y=[trade["buy_price"]], mode="markers+text",
+                       marker=dict(color=_DOWN, size=13, symbol="triangle-up"),
+                       text=[f" 매수 {trade['buy_price']:,.0f}"], textposition="bottom right",
+                       name="매수"),
+            row=1, col=1,
+        )
+        fig.add_trace(
+            go.Scatter(x=[trade["sell_time"]], y=[trade["sell_price"]], mode="markers+text",
+                       marker=dict(color=_UP, size=13, symbol="triangle-down"),
+                       text=[f" 매도 {trade['sell_price']:,.0f}"], textposition="top right",
+                       name="매도"),
+            row=1, col=1,
+        )
+        title = (f"{name} ({code}) · {date} 1분봉  |  "
+                 f"최적 단타 {trade['ret_pct']:+.2f}%  ·  {trade['profit_amt']:,.0f}원")
     else:
-        title = f"\n{name}({code}) {date} 1분봉  |  당일 수익 가능 구간 없음"
+        title = f"{name} ({code}) · {date} 1분봉  |  수익 가능 구간 없음"
 
-    fig, axes = mpf.plot(
-        df_min, type="candle", style=_STYLE, mav=(5, 20), volume=True,
-        returnfig=True, figsize=(11, 6), title=title,
+    fig.update_layout(
+        title=title, height=620, hovermode="x unified", dragmode="zoom",
+        margin=dict(t=60, b=20, l=10, r=10),
+        legend=dict(orientation="h", y=1.02, x=1, xanchor="right", yanchor="bottom"),
+        xaxis_rangeslider_visible=False,
     )
-    if trade:
-        # mplfinance x축은 정수 위치 인덱스 → buy_pos~sell_pos 음영
-        axes[0].axvspan(trade["buy_pos"], trade["sell_pos"], color="gold", alpha=0.25)
-        axes[0].annotate(
-            f"매수 {trade['buy_price']:,.0f}", (trade["buy_pos"], trade["buy_price"]),
-            color="blue", fontsize=8, ha="center", va="top",
+    fig.update_yaxes(title_text="가격", row=1, col=1)
+    fig.update_yaxes(title_text="거래량", row=2, col=1)
+    return fig
+
+
+def build_daily_figure(name: str, code: str, df: pd.DataFrame,
+                       investor: pd.DataFrame) -> go.Figure:
+    has_inv = not investor.empty
+    rows = 3 if has_inv else 2
+    heights = [0.6, 0.2, 0.2] if has_inv else [0.75, 0.25]
+    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.03, row_heights=heights)
+    fig.add_trace(
+        go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"],
+                       close=df["Close"], name="일봉",
+                       increasing_line_color=_UP, decreasing_line_color=_DOWN),
+        row=1, col=1,
+    )
+    for n, color in [(5, "orange"), (20, "purple")]:
+        fig.add_trace(
+            go.Scatter(x=df.index, y=_ma(df["Close"], n), name=f"MA{n}",
+                       line=dict(width=1, color=color)),
+            row=1, col=1,
         )
-        axes[0].annotate(
-            f"매도 {trade['sell_price']:,.0f}", (trade["sell_pos"], trade["sell_price"]),
-            color="red", fontsize=8, ha="center", va="bottom",
-        )
-    fig.savefig(save_to, dpi=100, bbox_inches="tight")
-    plt.close(fig)
-    return save_to
+    vol_colors = [_UP if c >= o else _DOWN for o, c in zip(df["Open"], df["Close"])]
+    fig.add_trace(
+        go.Bar(x=df.index, y=df["Volume"], marker_color=vol_colors, name="거래량",
+               showlegend=False),
+        row=2, col=1,
+    )
+    if has_inv:
+        inv = investor.reindex(df.index).fillna(0).cumsum()
+        for col, color in [("외국인", _UP), ("기관", "#2f9e44"), ("개인", _DOWN)]:
+            fig.add_trace(
+                go.Scatter(x=inv.index, y=inv[col], name=col, line=dict(color=color, width=1.2)),
+                row=3, col=1,
+            )
+        fig.update_yaxes(title_text="누적수급", row=3, col=1)
+
+    fig.update_layout(
+        title=f"{name} ({code}) 일봉  |  외인/기관/개인 누적 순매수",
+        height=720, hovermode="x unified", margin=dict(t=60, b=20, l=10, r=10),
+        legend=dict(orientation="h", y=1.02, x=1, xanchor="right", yanchor="bottom"),
+        xaxis_rangeslider_visible=False,
+    )
+    fig.update_yaxes(title_text="가격", row=1, col=1)
+    fig.update_yaxes(title_text="거래량", row=2, col=1)
+    return fig

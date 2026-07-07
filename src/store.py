@@ -67,8 +67,11 @@ def _memo_id(code: str, date: str) -> str:
     return f"{code}_{date}"
 
 
-def upsert_memo(code: str, name: str, date: str, memo: str, image: str) -> None:
-    """(code, date) 기준 upsert. 있으면 갱신, 없으면 추가."""
+def upsert_memo(code: str, name: str, date: str, memo: str, data_file: str = "") -> None:
+    """(code, date) 기준 upsert. 있으면 갱신, 없으면 추가.
+
+    data_file: 역추적용 1분봉 데이터(CSV) 경로.
+    """
     data = _load()
     mid = _memo_id(code, date)
     rec = {
@@ -77,7 +80,7 @@ def upsert_memo(code: str, name: str, date: str, memo: str, image: str) -> None:
         "name": name,
         "date": date,
         "memo": memo,
-        "image": image,
+        "data": data_file,
         "updated": _now(),
     }
     for i, m in enumerate(data["memos"]):
