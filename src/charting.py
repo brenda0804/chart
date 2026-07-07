@@ -6,27 +6,14 @@
 - hover 툴팁 / 확대·축소 / 구간 포커스는 Plotly 기본 제공
 """
 import math
-import re
-from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-_OUTPUT_ROOT = Path(__file__).resolve().parent.parent / "outputs"
 CAPITAL = 10_000_000  # 단타 분석 기준 투자금 (1,000만 원)
 
 _UP, _DOWN = "#e03131", "#1c7ed6"  # 한국식: 상승=빨강, 하락=파랑
-
-
-def _safe_dir(name: str) -> str:
-    return re.sub(r'[\\/:*?"<>|]', "_", name).strip() or "unknown"
-
-
-def data_path(name: str, date: str) -> Path:
-    d = _OUTPUT_ROOT / _safe_dir(name)
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"{date}_min.csv"
 
 
 # ---- 데이터 → DataFrame --------------------------------------------------
@@ -71,23 +58,6 @@ def investor_to_df(rows: list[dict]) -> pd.DataFrame:
     for c in ["외국인", "기관", "개인"]:
         df[c] = pd.to_numeric(df.get(c), errors="coerce")
     return df.set_index("Date").sort_index()[["외국인", "기관", "개인"]]
-
-
-# ---- 저장 / 로드 (역추적용) ----------------------------------------------
-def save_minute_data(name: str, date: str, df: pd.DataFrame) -> Path:
-    p = data_path(name, date)
-    df.to_csv(p, encoding="utf-8-sig")
-    return p
-
-
-def load_minute_data(name: str, date: str) -> pd.DataFrame | None:
-    p = data_path(name, date)
-    if not p.exists():
-        return None
-    try:
-        return pd.read_csv(p, index_col=0, parse_dates=True)
-    except Exception:
-        return None
 
 
 # ---- 단타 분석 ------------------------------------------------------------

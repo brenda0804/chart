@@ -99,12 +99,12 @@ def tab_analysis(selected: dict) -> None:
             use_container_width=True,
         )
 
-    # ---- 1분봉 (세션 우선, 없으면 저장 데이터) ----
+    # ---- 1분봉 (세션 우선, 없으면 DB 저장 데이터) ----
     df_min = None
     if ana and ana["key"] == key:
         df_min = ana.get("df_min")
     if df_min is None:
-        df_min = charting.load_minute_data(name, date_str)
+        df_min = store.load_minute_data(code, date_str)
 
     if df_min is not None and not df_min.empty:
         _render_minute_section(name, code, date_str, df_min)
@@ -199,9 +199,9 @@ def _run_analysis(code: str, name: str, date_str: str, is_today: bool) -> None:
                         f"(서버가 마감 세션 데이터를 함께 줘서 {before}개가 왔으나, 미래 시각은 잘라냈습니다)"
                     )
                 if not df_min.empty:
-                    charting.save_minute_data(name, date_str, df_min)
+                    store.save_minute_data(code, name, date_str, df_min)
         else:
-            df_min = charting.load_minute_data(name, date_str)
+            df_min = store.load_minute_data(code, date_str)
 
         st.session_state["ana"] = {
             "key": f"{code}_{date_str}", "df_min": df_min,
@@ -224,9 +224,7 @@ def _render_memo(code: str, name: str, date_str: str) -> None:
     )
     c1, c2 = st.columns([1, 5])
     if c1.button("💾 저장"):
-        p = charting.data_path(name, date_str)
-        data_file = str(p) if p.exists() else ""
-        store.upsert_memo(code, name, date_str, memo_text.strip(), data_file)
+        store.upsert_memo(code, name, date_str, memo_text.strip())
         st.success("메모가 저장되었습니다.")
     if existing and c2.button("🗑️ 메모 삭제"):
         store.delete_memo(existing["id"])
@@ -269,7 +267,7 @@ def tab_journal() -> None:
             st.info("← 왼쪽에서 [차트 보기]를 누르면 당시 차트(인터랙티브)와 메모가 표시됩니다.")
             return
         st.markdown(f"### {sel['name']} ({sel['code']}) — {sel['date']}")
-        df = charting.load_minute_data(sel["name"], sel["date"])
+        df = store.load_minute_data(sel["code"], sel["date"])
         if df is not None and not df.empty:
             trade = charting.optimal_daytrade(df)
             st.plotly_chart(

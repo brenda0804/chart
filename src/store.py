@@ -1,65 +1,87 @@
-"""로컬 데이터 저장소 (data_store.json 단일 파일).
+"""데이터 저장소 — Supabase(클라우드 Postgres) REST 백엔드.
 
-- watchlist: 관심 종목 목록 [{code, name, added}]
-- memos: 날짜별 매매일지 메모 [{id, code, name, date, memo, image, updated}]
+테이블: watchlist / memos / minute_data  (database/supabase_schema.sql 로 사전 생성)
+- 관심종목 CRUD
+- 메모(매매일지) upsert/조회/삭제  (종목+날짜당 1건)
+- 1분봉 데이터 저장/로드 (Parquet → base64 로 minute_data.parquet 컬럼)
 
-메모는 (종목코드, 날짜) 조합당 1건으로 upsert 한다.
+supabase-py 대신 requests 로 PostgREST 를 직접 호출한다(의존성 최소화).
 """
-import json
+import base64
+import io
 import time
-from pathlib import Path
 
-_STORE_PATH = Path(__file__).resolve().parent.parent / "data_store.json"
-_DEFAULT = {"watchlist": [], "memos": []}
+import pandas as pd
+import requests
+
+from . import config
 
 
-def _load() -> dict:
-    if not _STORE_PATH.exists():
-        return {"watchlist": [], "memos": []}
+class StoreError(RuntimeError):
+    """저장소 접근 오류."""
+
+
+def _headers(extra: dict | None = None) -> dict:
+    h = {
+        "apikey": config.SUPABASE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if extra:
+        h.update(extra)
+    return h
+
+
+def _url(table: str) -> str:
+    return f"{config.SUPABASE_URL}/rest/v1/{table}"
+
+
+def _request(method: str, table: str, *, params=None, json=None, prefer=None) -> list:
+    config.validate_supabase()
+    extra = {"Prefer": prefer} if prefer else None
     try:
-        data = json.loads(_STORE_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"watchlist": [], "memos": []}
-    data.setdefault("watchlist", [])
-    data.setdefault("memos", [])
-    return data
+        resp = requests.request(
+            method, _url(table), headers=_headers(extra),
+            params=params, json=json, timeout=15,
+        )
+    except requests.RequestException as e:
+        raise StoreError(f"Supabase 연결 실패: {e}") from e
+    if resp.status_code >= 400:
+        raise StoreError(f"Supabase 오류 {resp.status_code}: {resp.text[:200]}")
+    if resp.text:
+        try:
+            return resp.json()
+        except ValueError:
+            return []
+    return []
 
 
-def _save(data: dict) -> None:
-    _STORE_PATH.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+def _now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
 # ---- 관심종목 CRUD -------------------------------------------------------
 def get_watchlist() -> list[dict]:
-    return _load()["watchlist"]
+    return _request("GET", "watchlist", params={"select": "code,name,added", "order": "added.asc"})
 
 
 def add_watch(code: str, name: str) -> bool:
     """추가. 이미 있으면 False."""
-    data = _load()
-    if any(w["code"] == code for w in data["watchlist"]):
+    existing = _request("GET", "watchlist", params={"code": f"eq.{code}", "select": "code"})
+    if existing:
         return False
-    data["watchlist"].append(
-        {"code": code, "name": name, "added": _now()}
-    )
-    _save(data)
+    _request("POST", "watchlist", json={"code": code, "name": name, "added": _now()},
+             prefer="return=minimal")
     return True
 
 
 def update_watch(code: str, name: str) -> None:
-    data = _load()
-    for w in data["watchlist"]:
-        if w["code"] == code:
-            w["name"] = name
-    _save(data)
+    _request("PATCH", "watchlist", params={"code": f"eq.{code}"},
+             json={"name": name}, prefer="return=minimal")
 
 
 def remove_watch(code: str) -> None:
-    data = _load()
-    data["watchlist"] = [w for w in data["watchlist"] if w["code"] != code]
-    _save(data)
+    _request("DELETE", "watchlist", params={"code": f"eq.{code}"}, prefer="return=minimal")
 
 
 # ---- 메모 CRUD -----------------------------------------------------------
@@ -67,49 +89,57 @@ def _memo_id(code: str, date: str) -> str:
     return f"{code}_{date}"
 
 
-def upsert_memo(code: str, name: str, date: str, memo: str, data_file: str = "") -> None:
-    """(code, date) 기준 upsert. 있으면 갱신, 없으면 추가.
-
-    data_file: 역추적용 1분봉 데이터(CSV) 경로.
-    """
-    data = _load()
-    mid = _memo_id(code, date)
+def upsert_memo(code: str, name: str, date: str, memo: str) -> None:
+    """(code, date) 기준 upsert."""
     rec = {
-        "id": mid,
-        "code": code,
-        "name": name,
-        "date": date,
-        "memo": memo,
-        "data": data_file,
-        "updated": _now(),
+        "id": _memo_id(code, date), "code": code, "name": name,
+        "date": date, "memo": memo, "updated": _now(),
     }
-    for i, m in enumerate(data["memos"]):
-        if m["id"] == mid:
-            data["memos"][i] = rec
-            _save(data)
-            return
-    data["memos"].append(rec)
-    _save(data)
+    _request("POST", "memos", params={"on_conflict": "id"}, json=rec,
+             prefer="resolution=merge-duplicates,return=minimal")
 
 
 def get_memos() -> list[dict]:
-    """최신 갱신순 정렬."""
-    return sorted(_load()["memos"], key=lambda m: m.get("updated", ""), reverse=True)
+    return _request("GET", "memos", params={"select": "*", "order": "updated.desc"})
 
 
 def get_memo(code: str, date: str) -> dict | None:
-    mid = _memo_id(code, date)
-    for m in _load()["memos"]:
-        if m["id"] == mid:
-            return m
-    return None
+    rows = _request("GET", "memos", params={"id": f"eq.{_memo_id(code, date)}", "select": "*"})
+    return rows[0] if rows else None
 
 
 def delete_memo(memo_id: str) -> None:
-    data = _load()
-    data["memos"] = [m for m in data["memos"] if m["id"] != memo_id]
-    _save(data)
+    _request("DELETE", "memos", params={"id": f"eq.{memo_id}"}, prefer="return=minimal")
 
 
-def _now() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+# ---- 1분봉 데이터 (Parquet base64) ---------------------------------------
+def save_minute_data(code: str, name: str, date: str, df: pd.DataFrame) -> None:
+    buf = io.BytesIO()
+    df.to_parquet(buf)  # index(=시각) 포함 저장
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    rec = {
+        "id": _memo_id(code, date), "code": code, "name": name, "date": date,
+        "parquet": encoded, "rows": int(len(df)), "updated": _now(),
+    }
+    _request("POST", "minute_data", params={"on_conflict": "id"}, json=rec,
+             prefer="resolution=merge-duplicates,return=minimal")
+
+
+def load_minute_data(code: str, date: str) -> pd.DataFrame | None:
+    rows = _request("GET", "minute_data",
+                    params={"id": f"eq.{_memo_id(code, date)}", "select": "parquet"})
+    if not rows:
+        return None
+    raw = base64.b64decode(rows[0]["parquet"])
+    return pd.read_parquet(io.BytesIO(raw))
+
+
+def delete_minute_data(code: str, date: str) -> None:
+    _request("DELETE", "minute_data", params={"id": f"eq.{_memo_id(code, date)}"},
+             prefer="return=minimal")
+
+
+def ping() -> bool:
+    """연결/스키마 확인용. 테이블 접근이 되면 True."""
+    _request("GET", "watchlist", params={"select": "code", "limit": "1"})
+    return True
