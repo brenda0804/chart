@@ -1,0 +1,33 @@
+# 환경변수 / 시크릿 (절대 커밋 금지)
+.env
+.env.local
+*.key
+*.secret
+secrets/
+
+# KIS 토큰 캐시
+token.json
+access_token*
+
+# 생성된 차트 이미지
+chart_*.png
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+build/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
