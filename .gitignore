@@ -9,8 +9,12 @@ secrets/
 token.json
 access_token*
 
-# 생성된 차트 이미지
+# 생성된 차트 이미지 / 분석 결과물
 chart_*.png
+outputs/
+
+# 로컬 데이터 저장소 (관심종목 + 메모)
+data_store.json
 
 # Python
 __pycache__/
