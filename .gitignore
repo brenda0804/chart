@@ -16,6 +16,9 @@ outputs/
 # 로컬 데이터 저장소 (관심종목 + 메모)
 data_store.json
 
+# 종목 마스터 캐시
+symbols.json
+
 # Python
 __pycache__/
 *.py[cod]

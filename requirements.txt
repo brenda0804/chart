@@ -4,4 +4,5 @@ pandas>=2.0
 mplfinance>=0.12.10b0
 matplotlib>=3.8
 streamlit>=1.36
+finance-datareader>=0.9.90
 websocket-client>=1.7

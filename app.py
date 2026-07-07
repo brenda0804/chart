@@ -7,27 +7,43 @@ from pathlib import Path
 
 import streamlit as st
 
-from src import kis_client, store, charting
+from src import kis_client, store, charting, symbols
 
 st.set_page_config(page_title="단타 매매일지 대시보드", page_icon="📈", layout="wide")
+
+
+@st.cache_data(show_spinner=False)
+def _search_symbols(query: str) -> list[dict]:
+    """종목 검색 (세션 내 결과 캐시). 최초 1회 KRX 마스터를 내려받는다."""
+    return symbols.search(query)
 
 
 # ---- 사이드바: 관심종목 CRUD ---------------------------------------------
 def sidebar_watchlist() -> dict | None:
     st.sidebar.header("⭐ 관심 종목")
 
-    with st.sidebar.form("add_watch", clear_on_submit=True):
-        st.caption("새 종목 추가")
-        c1, c2 = st.columns(2)
-        code = c1.text_input("종목코드", placeholder="005930")
-        name = c2.text_input("종목명", placeholder="삼성전자")
-        if st.form_submit_button("추가", use_container_width=True):
-            if code and name:
-                ok = store.add_watch(code.strip(), name.strip())
-                st.toast("추가됨" if ok else "이미 등록된 종목")
+    # --- 종목 검색으로 추가 (이름/코드 부분 입력) ---
+    st.sidebar.caption("🔎 종목 검색으로 추가")
+    query = st.sidebar.text_input(
+        "종목명 또는 코드", placeholder="예: 삼성 / 005930", key="symbol_query"
+    )
+    if query:
+        try:
+            with st.spinner("종목 검색 중..."):
+                results = _search_symbols(query)
+        except Exception as e:  # noqa: BLE001 (종목 마스터 로드 실패)
+            st.sidebar.error(f"종목 목록 로드 실패: {e}")
+            results = []
+        if results:
+            opts = {f"{s['name']} ({s['code']}) · {s['market']}": s for s in results}
+            picked = st.sidebar.selectbox("검색 결과", list(opts.keys()), key="symbol_pick")
+            if st.sidebar.button("➕ 관심 종목에 추가", use_container_width=True):
+                s = opts[picked]
+                ok = store.add_watch(s["code"], s["name"])
+                st.toast(f"{s['name']} 추가됨" if ok else "이미 등록된 종목")
                 st.rerun()
-            else:
-                st.warning("종목코드와 종목명을 모두 입력하세요.")
+        else:
+            st.sidebar.info("검색 결과가 없습니다. 다른 키워드를 입력해 보세요.")
 
     watchlist = store.get_watchlist()
     if not watchlist:
