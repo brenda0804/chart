@@ -120,6 +120,42 @@ def _trade(df: pd.DataFrame, buy_pos: int, sell_pos: int, capital: int,
     }
 
 
+def gap_info(df_daily: pd.DataFrame, date_str: str, capital: int = CAPITAL,
+             commission_rate: float = COMMISSION_RATE, tax_rate: float = TAX_RATE) -> dict | None:
+    """전일 종가 대비 당일 시가 갭(오버나이트) 정보.
+
+    '전날 종가에 사서 당일 시가에 팔았다면'의 순이익(수수료·세금 반영)도 계산.
+    """
+    if df_daily is None or df_daily.empty:
+        return None
+    df = df_daily.sort_index()
+    target = pd.to_datetime(date_str, format="%Y%m%d")
+    if target not in df.index:
+        return None
+    pos = df.index.get_loc(target)
+    if pos == 0:
+        return None
+    prev_close = float(df.iloc[pos - 1]["Close"])
+    open_price = float(df.iloc[pos]["Open"])
+    if prev_close <= 0 or open_price <= 0:
+        return None
+    gap_pct = (open_price - prev_close) / prev_close * 100
+
+    shares = math.floor(capital / prev_close)
+    buy_amt = shares * prev_close
+    sell_amt = shares * open_price
+    gross = sell_amt - buy_amt
+    fees = (math.floor(buy_amt * commission_rate) + math.floor(sell_amt * commission_rate)
+            + math.floor(sell_amt * tax_rate))
+    net = gross - fees
+    return {
+        "prev_date": df.index[pos - 1], "prev_close": prev_close,
+        "open_price": open_price, "gap_pct": gap_pct, "shares": shares,
+        "gross": gross, "fees": fees, "net": net,
+        "net_ret": net / buy_amt * 100 if buy_amt else 0.0,
+    }
+
+
 # ---- Plotly 차트 ----------------------------------------------------------
 def _ma(series: pd.Series, n: int) -> pd.Series:
     return series.rolling(n).mean()

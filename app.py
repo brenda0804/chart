@@ -103,10 +103,16 @@ def tab_analysis(selected: dict) -> None:
     if c1.button("🔍 분석 실행", type="primary"):
         _run_analysis(code, name, date_str, is_today)
 
-    # ---- 일봉 (세션에 있으면) ----
+    comm = st.session_state.get("comm_rate", charting.COMMISSION_RATE)
+    tax = st.session_state.get("tax_rate", charting.TAX_RATE)
+
+    # ---- 일봉 + 전일 대비 시가 갭 (세션에 있으면) ----
     ana = st.session_state.get("ana")
     key = f"{code}_{date_str}"
     if ana and ana["key"] == key and ana.get("df_daily") is not None:
+        gi = charting.gap_info(ana["df_daily"], date_str, commission_rate=comm, tax_rate=tax)
+        if gi:
+            _render_gap(gi)
         st.plotly_chart(
             charting.build_daily_figure(name, code, ana["df_daily"], ana["investor"]),
             use_container_width=True,
@@ -125,6 +131,22 @@ def tab_analysis(selected: dict) -> None:
         st.caption("1분봉 데이터가 없습니다. [분석 실행]을 눌러 생성하세요(당일만 가능).")
 
     _render_memo(code, name, date_str)
+
+
+def _render_gap(gi: dict) -> None:
+    """전일 종가 대비 시가 갭 패널."""
+    st.markdown("##### 🌙 전일 종가 대비 시가 (갭)")
+    c = st.columns(4)
+    c[0].metric("전일 종가", f"{gi['prev_close']:,.0f}원", gi["prev_date"].strftime("%m/%d"))
+    c[1].metric("당일 시가(09:00)", f"{gi['open_price']:,.0f}원")
+    c[2].metric("시가 등락률", f"{gi['gap_pct']:+.2f}%")
+    c[3].metric("전날 보유 순이익", f"{gi['net']:,.0f}원", f"{gi['net_ret']:+.2f}%")
+    verb = "올라" if gi["gap_pct"] >= 0 else "내려"
+    st.caption(
+        f"전일({gi['prev_date']:%m/%d}) 종가 {gi['prev_close']:,.0f}원 → 당일 시가 {gi['open_price']:,.0f}원 "
+        f"({gi['gap_pct']:+.2f}% {verb}감). 전날 종가에 1천만원어치({gi['shares']:,}주) 사서 당일 시가에 "
+        f"팔았다면 순이익 **{gi['net']:+,.0f}원** (수수료·세금 {gi['fees']:,.0f}원 차감)"
+    )
 
 
 def _render_minute_section(name: str, code: str, date_str: str, df_min) -> None:
