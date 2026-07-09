@@ -67,7 +67,20 @@ def sidebar_watchlist() -> dict | None:
             st.toast("삭제됨")
             st.rerun()
 
+    _sidebar_fee_settings()
     return selected
+
+
+def _sidebar_fee_settings() -> None:
+    """수수료·세금율 설정 (증권사마다 다름). 세션에 저장해 단타 계산에 반영."""
+    with st.sidebar.expander("⚙️ 수수료·세금 설정"):
+        comm = st.number_input("매매수수료 %(편도)", min_value=0.0, max_value=1.0,
+                               value=0.015, step=0.001, format="%.4f")
+        tax = st.number_input("증권거래세 %(매도)", min_value=0.0, max_value=1.0,
+                              value=0.15, step=0.01, format="%.4f")
+        st.session_state["comm_rate"] = comm / 100
+        st.session_state["tax_rate"] = tax / 100
+        st.caption("기본: 수수료 0.015%, 거래세 0.15%(2025~)")
 
 
 # ---- 탭 1: 차트 분석 & 메모 ----------------------------------------------
@@ -130,27 +143,33 @@ def _render_minute_section(name: str, code: str, date_str: str, df_min) -> None:
         st.info("선택 구간에 데이터가 부족합니다.")
         return
 
-    trade = charting.optimal_daytrade(dff)
+    comm = st.session_state.get("comm_rate", charting.COMMISSION_RATE)
+    tax = st.session_state.get("tax_rate", charting.TAX_RATE)
+
+    trade = charting.optimal_daytrade(dff, commission_rate=comm, tax_rate=tax)
     st.plotly_chart(
         charting.build_minute_figure(name, code, date_str, dff, trade),
         use_container_width=True,
     )
 
-    # --- 최적 단타 상세 (요구 4) ---
+    # --- 최적 단타 상세 (요구 4, 수수료·세금 반영) ---
     st.markdown("##### 💰 이 구간 최적 단타 (사후 복기 · 실시간 신호 아님)")
     if trade:
         m = st.columns(4)
         m[0].metric("매수", f"{trade['buy_price']:,.0f}원", trade["buy_time"].strftime("%H:%M"))
         m[1].metric("매도", f"{trade['sell_price']:,.0f}원", trade["sell_time"].strftime("%H:%M"))
-        m[2].metric("수익률", f"{trade['ret_pct']:+.2f}%")
-        m[3].metric("수익금", f"{trade['profit_amt']:,.0f}원", f"{trade['shares']:,}주 매수")
+        m[2].metric("순수익률", f"{trade['ret_pct']:+.2f}%",
+                    f"세전 {trade['gross_ret_pct']:+.2f}%")
+        m[3].metric("순수익금", f"{trade['profit_amt']:,.0f}원", f"{trade['shares']:,}주 매수")
         st.caption(
-            f"1,000만원으로 {trade['buy_time']:%H:%M}에 {trade['buy_price']:,.0f}원 매수({trade['shares']:,}주, "
-            f"{trade['cost']:,.0f}원) → {trade['sell_time']:%H:%M}에 {trade['sell_price']:,.0f}원 매도 시 "
-            f"**{trade['profit_amt']:+,.0f}원** ({trade['ret_pct']:+.2f}%)"
+            f"{trade['buy_time']:%H:%M} {trade['buy_price']:,.0f}원 매수({trade['shares']:,}주, "
+            f"{trade['cost']:,.0f}원) → {trade['sell_time']:%H:%M} {trade['sell_price']:,.0f}원 매도  \n"
+            f"세전차익 **{trade['gross_profit']:+,.0f}원** − 비용 {trade['fees_total']:,.0f}원"
+            f"(매수수수료 {trade['buy_fee']:,.0f} + 매도수수료 {trade['sell_fee']:,.0f} + 거래세 {trade['tax']:,.0f}) "
+            f"= **순이익 {trade['profit_amt']:+,.0f}원** ({trade['ret_pct']:+.2f}%)"
         )
     else:
-        st.info("이 구간에는 수익 가능한 매수→매도 조합이 없습니다.")
+        st.info("이 구간에는 수수료·세금까지 빼고 남는 수익 구간이 없습니다.")
 
     # --- 직접 시뮬레이션 (요구 4) ---
     with st.expander("🧮 직접 매수/매도 시점 골라 시뮬레이션"):
@@ -162,11 +181,12 @@ def _render_minute_section(name: str, code: str, date_str: str, df_min) -> None:
         si = s2.select_slider("매도 시각", options=range(len(times)), value=len(times) - 1,
                               format_func=lambda i: labels[i], key="sim_sell")
         if si > bi:
-            r = charting.simulate(dff, bi, si)
+            r = charting.simulate(dff, bi, si, commission_rate=comm, tax_rate=tax)
             st.success(
                 f"{labels[bi]} {r['buy_price']:,.0f}원 매수({r['shares']:,}주) → "
                 f"{labels[si]} {r['sell_price']:,.0f}원 매도  ⇒  "
-                f"**{r['profit_amt']:+,.0f}원** ({r['ret_pct']:+.2f}%)"
+                f"순이익 **{r['profit_amt']:+,.0f}원** ({r['ret_pct']:+.2f}%)  "
+                f"·  비용 {r['fees_total']:,.0f}원(수수료+거래세)"
             )
         else:
             st.warning("매도 시각을 매수 시각보다 뒤로 선택하세요.")
@@ -282,7 +302,7 @@ def tab_journal() -> None:
 
 # ---- 메인 ----------------------------------------------------------------
 def main() -> None:
-    st.title("📈 관심종목 · 단타 복기 매매일지")
+    st.title("📈")
     selected = sidebar_watchlist()
     tab1, tab2 = st.tabs(["차트 분석 & 메모", "종합 매매일지"])
     with tab1:

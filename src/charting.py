@@ -13,6 +13,10 @@ from plotly.subplots import make_subplots
 
 CAPITAL = 10_000_000  # 단타 분석 기준 투자금 (1,000만 원)
 
+# 거래 비용 (기본값 — 증권사마다 다르므로 UI 에서 조정 가능)
+COMMISSION_RATE = 0.00015  # 매매수수료 0.015% (편도, 매수·매도 각각)
+TAX_RATE = 0.0015          # 증권거래세 0.15% (매도 시에만, 2025~ KOSPI·KOSDAQ)
+
 _UP, _DOWN = "#e03131", "#1c7ed6"  # 한국식: 상승=빨강, 하락=파랑
 
 
@@ -61,41 +65,58 @@ def investor_to_df(rows: list[dict]) -> pd.DataFrame:
 
 
 # ---- 단타 분석 ------------------------------------------------------------
-def optimal_daytrade(df_min: pd.DataFrame, capital: int = CAPITAL) -> dict | None:
-    """구간 내 '한 번 매수→한 번 매도' 최대수익 (사후 최적해, 복기용)."""
+def optimal_daytrade(df_min: pd.DataFrame, capital: int = CAPITAL,
+                     commission_rate: float = COMMISSION_RATE,
+                     tax_rate: float = TAX_RATE) -> dict | None:
+    """구간 내 '한 번 매수→한 번 매도' 최대수익 (사후 최적해, 복기용).
+
+    수수료·세금을 반영한 순이익이 최대가 되는 구간을 찾는다.
+    """
     closes = df_min["Close"].tolist()
     if len(closes) < 2:
         return None
-    min_pos, best = 0, None
+    min_pos, best_net, best = 0, None, None
     for j in range(len(closes)):
-        gain = closes[j] - closes[min_pos]
-        if best is None or gain > best[0]:
-            best = (gain, min_pos, j)
+        t = _trade(df_min, min_pos, j, capital, commission_rate, tax_rate)
+        if best_net is None or t["profit_amt"] > best_net:
+            best_net, best = t["profit_amt"], t
         if closes[j] < closes[min_pos]:
             min_pos = j
-    _, buy_pos, sell_pos = best
-    if buy_pos == sell_pos or closes[sell_pos] <= closes[buy_pos]:
-        return None
-    return _trade(df_min, buy_pos, sell_pos, capital)
+    if best is None or best["buy_pos"] == best["sell_pos"] or best["profit_amt"] <= 0:
+        return None  # 수수료·세금까지 빼고 남는 순이익 구간이 없음
+    return best
 
 
-def simulate(df_min: pd.DataFrame, buy_pos: int, sell_pos: int, capital: int = CAPITAL) -> dict:
-    """사용자 지정 매수/매도 위치로 손익 계산."""
-    return _trade(df_min, buy_pos, sell_pos, capital)
+def simulate(df_min: pd.DataFrame, buy_pos: int, sell_pos: int, capital: int = CAPITAL,
+             commission_rate: float = COMMISSION_RATE, tax_rate: float = TAX_RATE) -> dict:
+    """사용자 지정 매수/매도 위치로 손익 계산 (수수료·세금 반영)."""
+    return _trade(df_min, buy_pos, sell_pos, capital, commission_rate, tax_rate)
 
 
-def _trade(df: pd.DataFrame, buy_pos: int, sell_pos: int, capital: int) -> dict:
+def _trade(df: pd.DataFrame, buy_pos: int, sell_pos: int, capital: int,
+           commission_rate: float = COMMISSION_RATE, tax_rate: float = TAX_RATE) -> dict:
     buy_price = float(df["Close"].iloc[buy_pos])
     sell_price = float(df["Close"].iloc[sell_pos])
     shares = math.floor(capital / buy_price) if buy_price > 0 else 0
-    profit = shares * (sell_price - buy_price)
-    ret = (sell_price - buy_price) / buy_price * 100 if buy_price else 0.0
+    buy_amount = shares * buy_price
+    sell_amount = shares * sell_price
+
+    gross = sell_amount - buy_amount                     # 세전 차익
+    buy_fee = math.floor(buy_amount * commission_rate)   # 매수 수수료
+    sell_fee = math.floor(sell_amount * commission_rate)  # 매도 수수료
+    tax = math.floor(sell_amount * tax_rate)             # 증권거래세(매도)
+    fees_total = buy_fee + sell_fee + tax
+    net = gross - fees_total                              # 순이익
+    ret = net / buy_amount * 100 if buy_amount else 0.0
+    gross_ret = gross / buy_amount * 100 if buy_amount else 0.0
     return {
         "buy_pos": buy_pos, "sell_pos": sell_pos,
         "buy_time": df.index[buy_pos], "sell_time": df.index[sell_pos],
         "buy_price": buy_price, "sell_price": sell_price,
-        "shares": shares, "cost": shares * buy_price,
-        "profit_amt": profit, "ret_pct": ret,
+        "shares": shares, "cost": buy_amount,
+        "gross_profit": gross, "buy_fee": buy_fee, "sell_fee": sell_fee,
+        "tax": tax, "fees_total": fees_total,
+        "profit_amt": net, "ret_pct": ret, "gross_ret_pct": gross_ret,
     }
 
 
@@ -146,7 +167,8 @@ def build_minute_figure(name: str, code: str, date: str,
             row=1, col=1,
         )
         title = (f"{name} ({code}) · {date} 1분봉  |  "
-                 f"최적 단타 {trade['ret_pct']:+.2f}%  ·  {trade['profit_amt']:,.0f}원")
+                 f"최적 단타 순이익 {trade['ret_pct']:+.2f}%  ·  {trade['profit_amt']:,.0f}원"
+                 f"  (수수료·세금 반영)")
     else:
         title = f"{name} ({code}) · {date} 1분봉  |  수익 가능 구간 없음"
 

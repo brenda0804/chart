@@ -19,6 +19,9 @@ data_store.json
 # 종목 마스터 캐시
 symbols.json
 
+# 로그
+*.log
+
 # Python
 __pycache__/
 *.py[cod]
