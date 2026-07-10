@@ -120,6 +120,20 @@ def _trade(df: pd.DataFrame, buy_pos: int, sell_pos: int, capital: int,
     }
 
 
+def net_pnl(buy_price: float, sell_price: float, capital: int = CAPITAL,
+            commission_rate: float = COMMISSION_RATE, tax_rate: float = TAX_RATE) -> dict:
+    """매수가→매도가 손익(수수료·세금 반영). 시나리오/갭 계산 공용."""
+    shares = math.floor(capital / buy_price) if buy_price > 0 else 0
+    buy_amt = shares * buy_price
+    sell_amt = shares * sell_price
+    gross = sell_amt - buy_amt
+    fees = (math.floor(buy_amt * commission_rate) + math.floor(sell_amt * commission_rate)
+            + math.floor(sell_amt * tax_rate))
+    net = gross - fees
+    return {"shares": shares, "gross": gross, "fees": fees, "net": net,
+            "ret": net / buy_amt * 100 if buy_amt else 0.0}
+
+
 def gap_info(df_daily: pd.DataFrame, date_str: str, capital: int = CAPITAL,
              commission_rate: float = COMMISSION_RATE, tax_rate: float = TAX_RATE) -> dict | None:
     """전일 종가 대비 당일 시가 갭(오버나이트) 정보.
@@ -162,7 +176,8 @@ def _ma(series: pd.Series, n: int) -> pd.Series:
 
 
 def build_minute_figure(name: str, code: str, date: str,
-                        df: pd.DataFrame, trade: dict | None) -> go.Figure:
+                        df: pd.DataFrame, trade: dict | None,
+                        scenario: dict | None = None) -> go.Figure:
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         vertical_spacing=0.04, row_heights=[0.75, 0.25])
     fig.add_trace(
@@ -207,6 +222,15 @@ def build_minute_figure(name: str, code: str, date: str,
                  f"  (수수료·세금 반영)")
     else:
         title = f"{name} ({code}) · {date} 1분봉  |  수익 가능 구간 없음"
+
+    # 시나리오 목표가/손절가 투영선 (예측 아님)
+    if scenario:
+        fig.add_hline(y=scenario["target"], line=dict(color="green", dash="dot", width=1.5),
+                      annotation_text=f"목표 {scenario['target']:,.0f} (+{scenario['target_pct']:.2f}%)",
+                      annotation_position="top left", row=1, col=1)
+        fig.add_hline(y=scenario["stop"], line=dict(color="red", dash="dot", width=1.5),
+                      annotation_text=f"손절 {scenario['stop']:,.0f} (-{scenario['stop_pct']:.2f}%)",
+                      annotation_position="bottom left", row=1, col=1)
 
     fig.update_layout(
         title=title, height=620, hovermode="x unified", dragmode="zoom",

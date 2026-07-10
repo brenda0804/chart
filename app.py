@@ -7,7 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from src import kis_client, store, charting, symbols
+from src import kis_client, store, charting, symbols, signals
 
 st.set_page_config(page_title="단타 매매일지 대시보드", page_icon="📈", layout="wide")
 
@@ -212,6 +212,74 @@ def _render_minute_section(name: str, code: str, date_str: str, df_min) -> None:
             )
         else:
             st.warning("매도 시각을 매수 시각보다 뒤로 선택하세요.")
+
+    _render_realtime(name, code, df_min, comm, tax)
+
+
+def _render_realtime(name: str, code: str, df_min, comm: float, tax: float) -> None:
+    """🔴 실시간 단타 모니터 (Phase 1: 폴링). 현재가·신호·판단·시나리오 투영."""
+    st.divider()
+    st.markdown("#### 🔴 실시간 단타 모니터  ·  참고용(투자자문·예측 아님)")
+    live = st.toggle("자동 새로고침 (30초)", key="live_toggle",
+                     help="켜면 30초마다 현재가를 다시 불러 신호·시나리오를 갱신합니다.")
+    run_every = "30s" if live else None
+
+    @st.fragment(run_every=run_every)
+    def panel() -> None:
+        cols = st.columns([1, 1, 2])
+        tp_in = cols[0].number_input("목표 수익률 %(0=자동)", min_value=0.0, value=0.0,
+                                     step=0.1, key="rt_tp")
+        sp_in = cols[1].number_input("손절 %(0=자동)", min_value=0.0, value=0.0,
+                                     step=0.1, key="rt_sp")
+        tp = tp_in if tp_in > 0 else None
+        sp = sp_in if sp_in > 0 else None
+
+        try:
+            q = kis_client.get_current_price(code)
+            cur = float(q.get("stck_prpr", 0))
+            chg = float(q.get("prdy_ctrt", 0))
+        except Exception as e:  # noqa: BLE001
+            st.error(f"현재가 조회 실패: {e}")
+            return
+        if cur <= 0:
+            st.warning("현재가를 가져오지 못했습니다(장외/휴장일 수 있음).")
+            return
+
+        sigs = signals.technical_signals(df_min, current_price=cur)
+        verdict = signals.timing_verdict(sigs)
+        sc = signals.scenario(df_min, cur, commission_rate=comm, tax_rate=tax,
+                              target_pct=tp, stop_pct=sp)
+
+        m = st.columns(3)
+        m[0].metric("현재가", f"{cur:,.0f}원", f"{chg:+.2f}% (전일대비)")
+        m[1].metric(f"목표가 (+{sc['target_pct']:.2f}%)", f"{sc['target']:,.0f}원",
+                    f"순이익 {sc['target_net']:+,.0f}원")
+        m[2].metric(f"손절가 (-{sc['stop_pct']:.2f}%)", f"{sc['stop']:,.0f}원",
+                    f"{sc['stop_net']:+,.0f}원", delta_color="inverse")
+
+        (st.success if verdict["go"] else st.info)(
+            f"**{verdict['title']}** — 판단 근거: {verdict['reason']}  \n"
+            f"손익비(목표/손절) {sc['rr']:.1f} · {sc['shares']:,}주 · 변동성 {sc['vol_pct']:.2f}%/분"
+        )
+        if sigs:
+            st.write("  ".join(f"`{s['label']}`" for s in sigs))
+            for s in sigs:
+                st.caption(f"- **{s['label']}**: {s['detail']}")
+        else:
+            st.caption("현재 특이 신호 없음 (20분 이상 데이터 필요)")
+
+        recent = df_min.tail(60)  # 최근 60분 + 목표/손절 투영
+        st.plotly_chart(
+            charting.build_minute_figure(name, code, recent.index[-1].strftime("%Y%m%d"),
+                                         recent, None, scenario=sc),
+            use_container_width=True,
+        )
+        st.caption(
+            f"⏱️ 갱신 {datetime.now():%H:%M:%S} · 목표/손절선은 변동성 기반 **시나리오**이며 "
+            "미래 가격 예측이 아닙니다. 실제 매매 판단·책임은 본인에게 있습니다."
+        )
+
+    panel()
 
 
 def _run_analysis(code: str, name: str, date_str: str, is_today: bool) -> None:
