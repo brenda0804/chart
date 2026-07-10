@@ -7,7 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from src import kis_client, store, charting, symbols, signals
+from src import kis_client, store, charting, symbols, signals, realtime_ws
 
 st.set_page_config(page_title="단타 매매일지 대시보드", page_icon="📈", layout="wide")
 
@@ -84,51 +84,105 @@ def _sidebar_fee_settings() -> None:
 
 
 # ---- 탭 1: 차트 분석 & 메모 ----------------------------------------------
+def _recent_trading_days(n: int = 12) -> list:
+    """최근 거래일(주말 제외) n개, 최신순. (공휴일은 미반영)"""
+    out, d = [], datetime.now().date()
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d)
+        d -= timedelta(days=1)
+    return out
+
+
+@st.cache_data(ttl=60, show_spinner="조회 중...")
+def fetch_analysis(code: str, name: str, date_str: str, is_today: bool) -> dict:
+    """(종목,날짜) 데이터 조회 — 캐시로 중복 호출 방지. [새로고침]이 캐시를 비운다."""
+    res = {"df_daily": None, "investor": None, "df_min": None, "clip_note": "", "error": ""}
+    try:
+        end = datetime.now()
+        start = end - timedelta(days=200)
+        daily_rows = kis_client.get_daily_chart(
+            code, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
+        res["df_daily"] = charting.daily_to_df(daily_rows) if daily_rows else None
+        res["investor"] = charting.investor_to_df(kis_client.get_investor_trend(code))
+        if is_today:
+            min_rows = kis_client.get_minute_chart(code)
+            if min_rows:
+                dfm = charting.minute_to_df(min_rows, date_str)
+                now = datetime.now()
+                before = len(dfm)
+                dfm = dfm[dfm.index <= now]  # 미래 캔들 제거
+                if len(dfm) < before:
+                    res["clip_note"] = (f"장중이라 현재({now:%H:%M})까지 {len(dfm)}개만 표시"
+                                        "(미래 캔들 제외). 전체 복기는 장 마감 후.")
+                if not dfm.empty:
+                    store.save_minute_data(code, name, date_str, dfm)
+                res["df_min"] = dfm
+        else:
+            res["df_min"] = store.load_minute_data(code, date_str)
+    except kis_client.KISError as e:
+        res["error"] = f"KIS API 오류: {e}"
+    except Exception as e:  # noqa: BLE001
+        res["error"] = f"조회 오류: {e}"
+    return res
+
+
 def tab_analysis(selected: dict) -> None:
     if not selected:
         st.info("← 사이드바에서 관심 종목을 먼저 추가/선택하세요.")
         return
 
     code, name = selected["code"], selected["name"]
-    st.subheader(f"📊 {name} ({code}) 분석")
+    top = st.columns([4, 1])
+    top[0].subheader(f"📊 {name} ({code}) 분석")
+    if top[1].button("🔄 새로고침", use_container_width=True,
+                     help="현재가·차트 데이터를 다시 불러옵니다(캐시 비움)."):
+        fetch_analysis.clear()
+        st.rerun()
 
-    c1, c2 = st.columns([1, 3])
-    pick = c1.date_input("분석 날짜", value=datetime.now())
-    date_str = pick.strftime("%Y%m%d")
-    is_today = date_str == datetime.now().strftime("%Y%m%d")
-    if not is_today:
-        c2.warning("⚠️ 과거 날짜는 KIS 무료 API로 1분봉을 새로 받을 수 없습니다. "
-                   "그날 저장해 둔 데이터가 있으면 인터랙티브로 복기합니다.")
-
-    if c1.button("🔍 분석 실행", type="primary"):
-        _run_analysis(code, name, date_str, is_today)
+    days = _recent_trading_days(12)
+    picked = st.multiselect(
+        "분석 날짜 (여러 개 선택 → 날짜별 탭, 진입 시 자동 조회)", days, default=[days[0]],
+        format_func=lambda d: d.strftime("%Y-%m-%d (%a)"), key=f"dates_{code}")
+    if not picked:
+        st.info("분석할 날짜를 하나 이상 선택하세요.")
+        return
 
     comm = st.session_state.get("comm_rate", charting.COMMISSION_RATE)
     tax = st.session_state.get("tax_rate", charting.TAX_RATE)
 
-    # ---- 일봉 + 전일 대비 시가 갭 (세션에 있으면) ----
-    ana = st.session_state.get("ana")
-    key = f"{code}_{date_str}"
-    if ana and ana["key"] == key and ana.get("df_daily") is not None:
-        gi = charting.gap_info(ana["df_daily"], date_str, commission_rate=comm, tax_rate=tax)
+    for tab, d in zip(st.tabs([d.strftime("%m/%d (%a)") for d in picked]), picked):
+        with tab:
+            _render_date(code, name, d, comm, tax)
+
+
+def _render_date(code: str, name: str, d, comm: float, tax: float) -> None:
+    """날짜별 탭 내용: 자동 조회 → 일봉/갭/1분봉/메모."""
+    date_str = d.strftime("%Y%m%d")
+    is_today = date_str == datetime.now().strftime("%Y%m%d")
+
+    data = fetch_analysis(code, name, date_str, is_today)
+    if data["error"]:
+        st.error(data["error"])
+        return
+    if data["clip_note"]:
+        st.caption(f"⏱️ {data['clip_note']}")
+
+    df_daily = data["df_daily"]
+    if df_daily is not None and not df_daily.empty:
+        gi = charting.gap_info(df_daily, date_str, commission_rate=comm, tax_rate=tax)
         if gi:
             _render_gap(gi)
-        st.plotly_chart(
-            charting.build_daily_figure(name, code, ana["df_daily"], ana["investor"]),
-            use_container_width=True,
-        )
+        st.plotly_chart(charting.build_daily_figure(name, code, df_daily, data["investor"]),
+                        use_container_width=True, key=f"daily_{code}_{date_str}")
 
-    # ---- 1분봉 (세션 우선, 없으면 DB 저장 데이터) ----
-    df_min = None
-    if ana and ana["key"] == key:
-        df_min = ana.get("df_min")
-    if df_min is None:
-        df_min = store.load_minute_data(code, date_str)
-
+    df_min = data["df_min"]
     if df_min is not None and not df_min.empty:
-        _render_minute_section(name, code, date_str, df_min)
+        _render_minute_section(name, code, date_str, df_min, comm, tax, is_today)
+    elif not is_today:
+        st.caption("이 날짜의 저장된 1분봉이 없습니다(그날 조회한 적이 없으면 복기 불가).")
     else:
-        st.caption("1분봉 데이터가 없습니다. [분석 실행]을 눌러 생성하세요(당일만 가능).")
+        st.caption("1분봉 데이터가 없습니다(장 시작 전/장외).")
 
     _render_memo(code, name, date_str)
 
@@ -149,15 +203,17 @@ def _render_gap(gi: dict) -> None:
     )
 
 
-def _render_minute_section(name: str, code: str, date_str: str, df_min) -> None:
+def _render_minute_section(name: str, code: str, date_str: str, df_min,
+                           comm: float, tax: float, is_today: bool) -> None:
+    k = f"{code}_{date_str}"  # 탭별 위젯 key 고유화
     st.markdown("#### ⏱️ 1분봉 (마우스 오버로 시/고/저/종가 확인, 드래그로 확대)")
 
-    # --- 구간 포커스 (요구 3) ---
+    # --- 구간 포커스 ---
     tmin = df_min.index[0].to_pydatetime()
     tmax = df_min.index[-1].to_pydatetime()
     if tmin < tmax:
         rng = st.slider("표시 구간", min_value=tmin, max_value=tmax,
-                        value=(tmin, tmax), format="HH:mm", key="focus_range")
+                        value=(tmin, tmax), format="HH:mm", key=f"focus_{k}")
         dff = df_min[(df_min.index >= rng[0]) & (df_min.index <= rng[1])]
     else:
         dff = df_min
@@ -165,13 +221,10 @@ def _render_minute_section(name: str, code: str, date_str: str, df_min) -> None:
         st.info("선택 구간에 데이터가 부족합니다.")
         return
 
-    comm = st.session_state.get("comm_rate", charting.COMMISSION_RATE)
-    tax = st.session_state.get("tax_rate", charting.TAX_RATE)
-
     trade = charting.optimal_daytrade(dff, commission_rate=comm, tax_rate=tax)
     st.plotly_chart(
         charting.build_minute_figure(name, code, date_str, dff, trade),
-        use_container_width=True,
+        use_container_width=True, key=f"minchart_{k}",
     )
 
     # --- 최적 단타 상세 (요구 4, 수수료·세금 반영) ---
@@ -199,9 +252,9 @@ def _render_minute_section(name: str, code: str, date_str: str, df_min) -> None:
         labels = [t.strftime("%H:%M") for t in times]
         s1, s2 = st.columns(2)
         bi = s1.select_slider("매수 시각", options=range(len(times)), value=0,
-                              format_func=lambda i: labels[i], key="sim_buy")
+                              format_func=lambda i: labels[i], key=f"simbuy_{k}")
         si = s2.select_slider("매도 시각", options=range(len(times)), value=len(times) - 1,
-                              format_func=lambda i: labels[i], key="sim_sell")
+                              format_func=lambda i: labels[i], key=f"simsell_{k}")
         if si > bi:
             r = charting.simulate(dff, bi, si, commission_rate=comm, tax_rate=tax)
             st.success(
@@ -213,34 +266,60 @@ def _render_minute_section(name: str, code: str, date_str: str, df_min) -> None:
         else:
             st.warning("매도 시각을 매수 시각보다 뒤로 선택하세요.")
 
-    _render_realtime(name, code, df_min, comm, tax)
+    # 실시간 모니터는 '오늘' 탭에서만 (장중 실시간 대상)
+    if is_today:
+        _render_realtime(name, code, date_str, df_min, comm, tax)
 
 
-def _render_realtime(name: str, code: str, df_min, comm: float, tax: float) -> None:
-    """🔴 실시간 단타 모니터 (Phase 1: 폴링). 현재가·신호·판단·시나리오 투영."""
+def _render_realtime(name: str, code: str, date_str: str, df_min,
+                     comm: float, tax: float) -> None:
+    """🔴 실시간 단타 모니터. 현재가·신호·판단·시나리오 투영."""
+    k = f"{code}_{date_str}"
     st.divider()
     st.markdown("#### 🔴 실시간 단타 모니터  ·  참고용(투자자문·예측 아님)")
-    live = st.toggle("자동 새로고침 (30초)", key="live_toggle",
-                     help="켜면 30초마다 현재가를 다시 불러 신호·시나리오를 갱신합니다.")
-    run_every = "30s" if live else None
+    t1, t2 = st.columns(2)
+    ws_on = t1.toggle("⚡ 실시간 WebSocket (초단위)", key=f"ws_{k}",
+                      help="장중 KIS 체결가를 초단위로 스트리밍(Phase 2).")
+    auto = t2.toggle("🔄 자동 새로고침 (30초)", key=f"live_{k}",
+                     help="REST 폴링으로 주기 갱신(Phase 1).")
+
+    # WebSocket 스트림 시작/중지 (토글 변경 시 전체 rerun 에서 처리)
+    if ws_on:
+        realtime_ws.start_stream(code)
+        run_every = "2s"      # 공유 틱을 자주 읽어 화면 갱신 (API 호출 아님)
+    else:
+        realtime_ws.stop_stream()
+        run_every = "30s" if auto else None
 
     @st.fragment(run_every=run_every)
     def panel() -> None:
         cols = st.columns([1, 1, 2])
         tp_in = cols[0].number_input("목표 수익률 %(0=자동)", min_value=0.0, value=0.0,
-                                     step=0.1, key="rt_tp")
+                                     step=0.1, key=f"rt_tp_{k}")
         sp_in = cols[1].number_input("손절 %(0=자동)", min_value=0.0, value=0.0,
-                                     step=0.1, key="rt_sp")
+                                     step=0.1, key=f"rt_sp_{k}")
         tp = tp_in if tp_in > 0 else None
         sp = sp_in if sp_in > 0 else None
 
-        try:
-            q = kis_client.get_current_price(code)
-            cur = float(q.get("stck_prpr", 0))
-            chg = float(q.get("prdy_ctrt", 0))
-        except Exception as e:  # noqa: BLE001
-            st.error(f"현재가 조회 실패: {e}")
-            return
+        cur, chg, src = 0.0, 0.0, ""
+        if ws_on:  # WebSocket 우선
+            tk = realtime_ws.latest_tick(code)
+            stt = realtime_ws.status()
+            if tk:
+                cur, chg = tk["price"], tk["chg_pct"]
+                src = f"⚡ WS 실시간 {tk['time'][:2]}:{tk['time'][2:4]}:{tk['time'][4:6]}"
+            else:
+                st.caption(f"⚡ WS {'연결됨' if stt['connected'] else '연결 대기'} · "
+                           f"체결 대기 중(장외이면 안 옴){' · ' + stt['error'] if stt['error'] else ''}. REST로 대체.")
+        if cur <= 0:  # WS 없거나 대기 → REST 조회
+            try:
+                q = kis_client.get_current_price(code)
+                cur = float(q.get("stck_prpr", 0))
+                chg = float(q.get("prdy_ctrt", 0))
+                src = "REST 조회"
+            except Exception as e:  # noqa: BLE001
+                st.error(f"현재가 조회 실패: {e}")
+                return
         if cur <= 0:
             st.warning("현재가를 가져오지 못했습니다(장외/휴장일 수 있음).")
             return
@@ -251,7 +330,7 @@ def _render_realtime(name: str, code: str, df_min, comm: float, tax: float) -> N
                               target_pct=tp, stop_pct=sp)
 
         m = st.columns(3)
-        m[0].metric("현재가", f"{cur:,.0f}원", f"{chg:+.2f}% (전일대비)")
+        m[0].metric(f"현재가 · {src}", f"{cur:,.0f}원", f"{chg:+.2f}% (전일대비)")
         m[1].metric(f"목표가 (+{sc['target_pct']:.2f}%)", f"{sc['target']:,.0f}원",
                     f"순이익 {sc['target_net']:+,.0f}원")
         m[2].metric(f"손절가 (-{sc['stop_pct']:.2f}%)", f"{sc['stop']:,.0f}원",
@@ -272,7 +351,7 @@ def _render_realtime(name: str, code: str, df_min, comm: float, tax: float) -> N
         st.plotly_chart(
             charting.build_minute_figure(name, code, recent.index[-1].strftime("%Y%m%d"),
                                          recent, None, scenario=sc),
-            use_container_width=True,
+            use_container_width=True, key=f"rtchart_{k}",
         )
         st.caption(
             f"⏱️ 갱신 {datetime.now():%H:%M:%S} · 목표/손절선은 변동성 기반 **시나리오**이며 "
@@ -282,61 +361,20 @@ def _render_realtime(name: str, code: str, df_min, comm: float, tax: float) -> N
     panel()
 
 
-def _run_analysis(code: str, name: str, date_str: str, is_today: bool) -> None:
-    try:
-        with st.spinner("일봉/수급 조회 중..."):
-            end = datetime.now()
-            start = end - timedelta(days=200)
-            daily_rows = kis_client.get_daily_chart(
-                code, start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
-            )
-            df_daily = charting.daily_to_df(daily_rows) if daily_rows else None
-            investor = charting.investor_to_df(kis_client.get_investor_trend(code))
-
-        df_min = None
-        if is_today:
-            with st.spinner("1분봉 조회 중... (초당 제한 회피로 다소 걸립니다)"):
-                min_rows = kis_client.get_minute_chart(code)
-            if min_rows:
-                df_min = charting.minute_to_df(min_rows, date_str)
-                now = datetime.now()
-                before = len(df_min)
-                df_min = df_min[df_min.index <= now]  # 미래 캔들 제거 (요구 5 수정)
-                if len(df_min) < before:
-                    st.info(
-                        f"⏱️ 장중이라 현재 시각({now:%H:%M})까지 {len(df_min)}개 캔들만 분석합니다. "
-                        "전체 하루 복기는 장 마감 후에 하세요. "
-                        f"(서버가 마감 세션 데이터를 함께 줘서 {before}개가 왔으나, 미래 시각은 잘라냈습니다)"
-                    )
-                if not df_min.empty:
-                    store.save_minute_data(code, name, date_str, df_min)
-        else:
-            df_min = store.load_minute_data(code, date_str)
-
-        st.session_state["ana"] = {
-            "key": f"{code}_{date_str}", "df_min": df_min,
-            "df_daily": df_daily, "investor": investor,
-        }
-        st.toast("분석 완료")
-    except kis_client.KISError as e:
-        st.error(f"KIS API 오류: {e}")
-    except Exception as e:  # noqa: BLE001
-        st.error(f"분석 중 오류: {e}")
-
-
 def _render_memo(code: str, name: str, date_str: str) -> None:
+    k = f"{code}_{date_str}"
     st.divider()
     st.markdown("#### 📝 이 날의 메모 기록")
     existing = store.get_memo(code, date_str)
     memo_text = st.text_area(
         "매매 복기 메모", value=existing["memo"] if existing else "", height=140,
-        placeholder="진입 근거, 실수, 다음 매매 시 개선점 등을 기록하세요.",
+        placeholder="진입 근거, 실수, 다음 매매 시 개선점 등을 기록하세요.", key=f"memo_{k}",
     )
     c1, c2 = st.columns([1, 5])
-    if c1.button("💾 저장"):
+    if c1.button("💾 저장", key=f"save_{k}"):
         store.upsert_memo(code, name, date_str, memo_text.strip())
         st.success("메모가 저장되었습니다.")
-    if existing and c2.button("🗑️ 메모 삭제"):
+    if existing and c2.button("🗑️ 메모 삭제", key=f"del_{k}"):
         store.delete_memo(existing["id"])
         st.rerun()
 
@@ -382,7 +420,7 @@ def tab_journal() -> None:
             trade = charting.optimal_daytrade(df)
             st.plotly_chart(
                 charting.build_minute_figure(sel["name"], sel["code"], sel["date"], df, trade),
-                use_container_width=True,
+                use_container_width=True, key=f"journal_{sel['id']}",
             )
         else:
             st.warning("저장된 차트 데이터를 찾을 수 없습니다. (그날 분석을 실행하지 않았거나 파일이 이동/삭제됨)")
