@@ -51,7 +51,7 @@ def sidebar_watchlist() -> dict | None:
         return None
 
     labels = [f"{w['name']} ({w['code']})" for w in watchlist]
-    idx = st.sidebar.radio("분석할 종목 선택", range(len(labels)),
+    idx = st.sidebar.radio("종목 (수정/삭제 대상)", range(len(labels)),
                            format_func=lambda i: labels[i])
     selected = watchlist[idx]
 
@@ -117,46 +117,67 @@ def fetch_analysis(code: str, name: str, date_str: str, is_today: bool) -> dict:
     return res
 
 
-def tab_analysis(selected: dict) -> None:
-    if not selected:
-        st.info("← 사이드바에서 관심 종목을 먼저 추가/선택하세요.")
-        return
-
-    code, name = selected["code"], selected["name"]
-    top = st.columns([4, 1])
-    top[0].subheader(f"📊 {name} ({code}) 분석")
-    if top[1].button("🔄 새로고침", use_container_width=True,
-                     help="현재가·차트 데이터를 다시 불러옵니다(캐시 비움)."):
-        fetch_analysis.clear()
-        st.rerun()
-
-    # --- 날짜 선택 + 추가 (아무 날짜나 달력에서 골라 탭으로 추가) ---
-    today = datetime.now().date()
-    if "sel_dates" not in st.session_state:
-        st.session_state.sel_dates = [today]
-    a = st.columns([2, 1, 3])
-    newd = a[0].date_input("날짜 선택", value=today, max_value=today, key="date_pick")
-    if a[1].button("➕ 날짜 추가", use_container_width=True):
-        if newd not in st.session_state.sel_dates:
-            st.session_state.sel_dates.append(newd)
-            st.session_state.sel_dates.sort(reverse=True)
-        st.rerun()
-    a[2].caption("날짜를 골라 **➕추가**하면 날짜별 탭이 생겨 여러 날을 동시에 볼 수 있어요.")
-
-    picked = st.session_state.sel_dates
-    if not picked:
-        st.info("날짜를 하나 이상 추가하세요.")
-        return
-
+def tab_analysis() -> None:
+    """달력 기반 네비게이션: 날짜 선택 → 그날 확인한 종목 클릭 → 우측에 차트/메모."""
+    st.subheader("📊 차트 분석 & 매매일지")
     comm = st.session_state.get("comm_rate", charting.COMMISSION_RATE)
     tax = st.session_state.get("tax_rate", charting.TAX_RATE)
+    today = datetime.now().date()
 
-    for tab, d in zip(st.tabs([d.strftime("%m/%d (%a)") for d in picked]), picked):
-        with tab:
-            if len(picked) > 1 and st.button("✖ 이 날짜 탭 닫기", key=f"close_{d}"):
-                st.session_state.sel_dates.remove(d)
-                st.rerun()
-            _render_date(code, name, d, comm, tax)
+    left, right = st.columns([1, 2.4])
+
+    with left:
+        cal = st.date_input("📅 날짜 선택", value=st.session_state.get("cal_date", today),
+                            max_value=today, key="cal_date_input")
+        st.session_state["cal_date"] = cal
+        date_str = cal.strftime("%Y%m%d")
+
+        # 기록 있는 날 바로가기 (DB 기반 → 기기 간 동기화)
+        rdates = store.record_dates()
+        if rdates:
+            with st.expander("🗓️ 기록 있는 날 바로가기"):
+                for rd in rdates[:15]:
+                    if st.button(f"{rd[:4]}-{rd[4:6]}-{rd[6:]}", key=f"rd_{rd}",
+                                 use_container_width=True):
+                        st.session_state["cal_date"] = datetime.strptime(rd, "%Y%m%d").date()
+                        st.rerun()
+
+        # 그날 확인한 종목 (메모/1분봉 있는 종목)
+        st.markdown(f"**📈 {cal:%m/%d} 확인한 종목**")
+        recs = store.stocks_on_date(date_str)
+        if recs:
+            for r in recs:
+                badge = ("📝" if r["has_memo"] else "") + ("📊" if r["has_data"] else "")
+                if st.button(f"{r['name']} ({r['code']}) {badge}",
+                             key=f"rec_{r['code']}_{date_str}", use_container_width=True):
+                    st.session_state["view_code"] = r["code"]
+                    st.session_state["view_name"] = r["name"]
+        else:
+            st.caption("이 날 기록이 없습니다.")
+
+        # 관심종목에서 이 날짜로 새로 분석
+        st.markdown("**⭐ 이 날짜로 새로 분석**")
+        wl = store.get_watchlist()
+        if not wl:
+            st.caption("사이드바에서 관심 종목을 추가하세요.")
+        for w in wl:
+            if st.button(f"➕ {w['name']} ({w['code']})", key=f"new_{w['code']}_{date_str}",
+                         use_container_width=True):
+                st.session_state["view_code"] = w["code"]
+                st.session_state["view_name"] = w["name"]
+
+    with right:
+        vc = st.session_state.get("view_code")
+        vn = st.session_state.get("view_name")
+        if not vc:
+            st.info("← 왼쪽에서 날짜를 고르고 종목을 클릭하면 여기에 차트·메모가 표시됩니다.")
+            return
+        head = st.columns([4, 1])
+        head[0].markdown(f"### {vn} ({vc}) — {cal:%Y-%m-%d (%a)}")
+        if head[1].button("🔄 새로고침", use_container_width=True):
+            fetch_analysis.clear()
+            st.rerun()
+        _render_date(vc, vn, cal, comm, tax)
 
 
 def _render_date(code: str, name: str, d, comm: float, tax: float) -> None:
@@ -434,10 +455,10 @@ def tab_journal() -> None:
 # ---- 메인 ----------------------------------------------------------------
 def main() -> None:
     st.title("📈")
-    selected = sidebar_watchlist()
+    sidebar_watchlist()
     tab1, tab2 = st.tabs(["차트 분석 & 메모", "종합 매매일지"])
     with tab1:
-        tab_analysis(selected)
+        tab_analysis()
     with tab2:
         tab_journal()
 

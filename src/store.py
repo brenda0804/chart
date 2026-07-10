@@ -139,6 +139,32 @@ def delete_minute_data(code: str, date: str) -> None:
              prefer="return=minimal")
 
 
+def record_dates(limit: int = 60) -> list[str]:
+    """메모 또는 1분봉이 저장된 날짜 목록(최신순). 달력 '기록 있는 날'용."""
+    try:
+        m = _request("GET", "memos", params={"select": "date"})
+        n = _request("GET", "minute_data", params={"select": "date"})
+    except StoreError:
+        return []
+    dates = sorted({r["date"] for r in (m + n) if r.get("date")}, reverse=True)
+    return dates[:limit]
+
+
+def stocks_on_date(date_str: str) -> list[dict]:
+    """해당 날짜에 기록(메모/1분봉)이 있는 종목 목록. [{code,name,has_memo,has_data}]."""
+    def _empty(code, nm):
+        return {"code": code, "name": nm, "has_memo": False, "has_data": False}
+
+    m = _request("GET", "memos", params={"date": f"eq.{date_str}", "select": "code,name"})
+    n = _request("GET", "minute_data", params={"date": f"eq.{date_str}", "select": "code,name"})
+    by: dict[str, dict] = {}
+    for r in m:
+        by.setdefault(r["code"], _empty(r["code"], r["name"]))["has_memo"] = True
+    for r in n:
+        by.setdefault(r["code"], _empty(r["code"], r["name"]))["has_data"] = True
+    return sorted(by.values(), key=lambda x: x["name"])
+
+
 def ping() -> bool:
     """연결/스키마 확인용. 테이블 접근이 되면 True."""
     _request("GET", "watchlist", params={"select": "code", "limit": "1"})
