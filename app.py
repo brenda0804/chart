@@ -84,16 +84,6 @@ def _sidebar_fee_settings() -> None:
 
 
 # ---- 탭 1: 차트 분석 & 메모 ----------------------------------------------
-def _recent_trading_days(n: int = 12) -> list:
-    """최근 거래일(주말 제외) n개, 최신순. (공휴일은 미반영)"""
-    out, d = [], datetime.now().date()
-    while len(out) < n:
-        if d.weekday() < 5:
-            out.append(d)
-        d -= timedelta(days=1)
-    return out
-
-
 @st.cache_data(ttl=60, show_spinner="조회 중...")
 def fetch_analysis(code: str, name: str, date_str: str, is_today: bool) -> dict:
     """(종목,날짜) 데이터 조회 — 캐시로 중복 호출 방지. [새로고침]이 캐시를 비운다."""
@@ -140,12 +130,22 @@ def tab_analysis(selected: dict) -> None:
         fetch_analysis.clear()
         st.rerun()
 
-    days = _recent_trading_days(12)
-    picked = st.multiselect(
-        "분석 날짜 (여러 개 선택 → 날짜별 탭, 진입 시 자동 조회)", days, default=[days[0]],
-        format_func=lambda d: d.strftime("%Y-%m-%d (%a)"), key=f"dates_{code}")
+    # --- 날짜 선택 + 추가 (아무 날짜나 달력에서 골라 탭으로 추가) ---
+    today = datetime.now().date()
+    if "sel_dates" not in st.session_state:
+        st.session_state.sel_dates = [today]
+    a = st.columns([2, 1, 3])
+    newd = a[0].date_input("날짜 선택", value=today, max_value=today, key="date_pick")
+    if a[1].button("➕ 날짜 추가", use_container_width=True):
+        if newd not in st.session_state.sel_dates:
+            st.session_state.sel_dates.append(newd)
+            st.session_state.sel_dates.sort(reverse=True)
+        st.rerun()
+    a[2].caption("날짜를 골라 **➕추가**하면 날짜별 탭이 생겨 여러 날을 동시에 볼 수 있어요.")
+
+    picked = st.session_state.sel_dates
     if not picked:
-        st.info("분석할 날짜를 하나 이상 선택하세요.")
+        st.info("날짜를 하나 이상 추가하세요.")
         return
 
     comm = st.session_state.get("comm_rate", charting.COMMISSION_RATE)
@@ -153,6 +153,9 @@ def tab_analysis(selected: dict) -> None:
 
     for tab, d in zip(st.tabs([d.strftime("%m/%d (%a)") for d in picked]), picked):
         with tab:
+            if len(picked) > 1 and st.button("✖ 이 날짜 탭 닫기", key=f"close_{d}"):
+                st.session_state.sel_dates.remove(d)
+                st.rerun()
             _render_date(code, name, d, comm, tax)
 
 
