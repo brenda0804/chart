@@ -20,13 +20,12 @@ def _search_symbols(query: str) -> list[dict]:
 
 
 # ---- 사이드바: 관심종목 CRUD ---------------------------------------------
-def sidebar_watchlist() -> dict | None:
+def sidebar_watchlist() -> None:
     st.sidebar.header("⭐ 관심 종목")
 
     # --- 종목 검색으로 추가 (이름/코드 부분 입력) ---
-    st.sidebar.caption("🔎 종목 검색으로 추가")
     query = st.sidebar.text_input(
-        "종목명 또는 코드", placeholder="예: 삼성 / 005930", key="symbol_query"
+        "종목 검색 (이름/코드)", placeholder="예: 삼성 / 005930", key="symbol_query"
     )
     if query:
         try:
@@ -49,27 +48,34 @@ def sidebar_watchlist() -> dict | None:
     watchlist = store.get_watchlist()
     if not watchlist:
         st.sidebar.info("관심 종목을 추가해 주세요.")
-        return None
+        _sidebar_fee_settings()
+        return
 
-    labels = [f"{w['name']} ({w['code']})" for w in watchlist]
-    idx = st.sidebar.radio("종목 (수정/삭제 대상)", range(len(labels)),
-                           format_func=lambda i: labels[i])
-    selected = watchlist[idx]
-
-    with st.sidebar.expander("✏️ 수정 / 삭제"):
-        new_name = st.text_input("종목명 수정", value=selected["name"], key="edit_name")
-        c1, c2 = st.columns(2)
-        if c1.button("수정", use_container_width=True):
-            store.update_watch(selected["code"], new_name.strip())
-            st.toast("수정됨")
+    st.sidebar.markdown("**목록**")
+    for w in watchlist:
+        row = st.sidebar.columns([5, 1, 1], vertical_alignment="center")
+        row[0].write(f"{w['name']} ({w['code']})")
+        if row[1].button("✏️", key=f"edit_{w['code']}", help="이름 수정"):
+            cur = st.session_state.get("editing")
+            st.session_state["editing"] = None if cur == w["code"] else w["code"]
             st.rerun()
-        if c2.button("삭제", use_container_width=True, type="primary"):
-            store.remove_watch(selected["code"])
-            st.toast("삭제됨")
+        if row[2].button("🗑️", key=f"del_{w['code']}", help="삭제"):
+            store.remove_watch(w["code"])
+            st.toast(f"{w['name']} 삭제됨")
             st.rerun()
+        if st.session_state.get("editing") == w["code"]:
+            newn = st.sidebar.text_input("새 이름", value=w["name"], key=f"ename_{w['code']}")
+            ec = st.sidebar.columns(2)
+            if ec[0].button("저장", key=f"esave_{w['code']}", use_container_width=True):
+                store.update_watch(w["code"], newn.strip())
+                st.session_state["editing"] = None
+                st.toast("수정됨")
+                st.rerun()
+            if ec[1].button("취소", key=f"ecancel_{w['code']}", use_container_width=True):
+                st.session_state["editing"] = None
+                st.rerun()
 
     _sidebar_fee_settings()
-    return selected
 
 
 def _sidebar_fee_settings() -> None:
@@ -118,9 +124,29 @@ def fetch_analysis(code: str, name: str, date_str: str, is_today: bool) -> dict:
     return res
 
 
+def _calendar_clicked_date(state) -> str | None:
+    """streamlit-calendar 반환에서 클릭된 날짜(YYYY-MM-DD) 추출.
+
+    날짜 셀 클릭(dateClick), 기록칩 클릭(eventClick), 범위 선택(select) 모두 대응.
+    """
+    if not state:
+        return None
+    cb = state.get("callback")
+    s = None
+    if cb == "dateClick":
+        d = state.get("dateClick") or {}
+        s = d.get("date") or d.get("dateStr")
+    elif cb == "eventClick":
+        ev = (state.get("eventClick") or {}).get("event") or {}
+        s = ev.get("start")
+    elif cb == "select":
+        d = state.get("select") or {}
+        s = d.get("start") or d.get("startStr")
+    return s[:10] if s else None
+
+
 def tab_analysis() -> None:
     """달력(월 뷰)에서 날짜 클릭 → 그날 확인한 종목을 탭으로. ➕탭에서 새 종목 분석 추가."""
-    st.subheader("📊 차트 분석 & 매매일지")
     comm = st.session_state.get("comm_rate", charting.COMMISSION_RATE)
     tax = st.session_state.get("tax_rate", charting.TAX_RATE)
     today = datetime.now().date()
@@ -145,17 +171,15 @@ def tab_analysis() -> None:
             "selectable": True,
         }
         state = calendar(events=events, options=options, key="cal_widget")
-        if state and state.get("callback") == "dateClick":
-            dc = state.get("dateClick") or {}
-            clicked = (dc.get("date") or dc.get("dateStr") or "")[:10]
-            if clicked:
-                try:
-                    nd = datetime.strptime(clicked, "%Y-%m-%d").date()
-                    if nd != cal_date and nd <= today:
-                        st.session_state["cal_date"] = nd
-                        st.rerun()
-                except ValueError:
-                    pass
+        clicked = _calendar_clicked_date(state)
+        if clicked:
+            try:
+                nd = datetime.strptime(clicked, "%Y-%m-%d").date()
+                if nd != cal_date and nd <= today:
+                    st.session_state["cal_date"] = nd
+                    st.rerun()
+            except ValueError:
+                pass
         st.caption(f"선택: **{cal_date:%Y-%m-%d (%a)}**  ·  📊 = 기록 있는 날")
 
     with cright:
@@ -474,7 +498,6 @@ def tab_journal() -> None:
 
 # ---- 메인 ----------------------------------------------------------------
 def main() -> None:
-    st.title("📈")
     sidebar_watchlist()
     tab1, tab2 = st.tabs(["차트 분석 & 메모", "종합 매매일지"])
     with tab1:
