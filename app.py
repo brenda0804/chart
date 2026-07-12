@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import streamlit as st
+from streamlit_calendar import calendar
 
 from src import kis_client, store, charting, symbols, signals, realtime_ws
 
@@ -118,72 +119,91 @@ def fetch_analysis(code: str, name: str, date_str: str, is_today: bool) -> dict:
 
 
 def tab_analysis() -> None:
-    """달력 기반 네비게이션: 날짜 선택 → 그날 확인한 종목 클릭 → 우측에 차트/메모."""
+    """달력(월 뷰)에서 날짜 클릭 → 그날 확인한 종목을 탭으로. ➕탭에서 새 종목 분석 추가."""
     st.subheader("📊 차트 분석 & 매매일지")
     comm = st.session_state.get("comm_rate", charting.COMMISSION_RATE)
     tax = st.session_state.get("tax_rate", charting.TAX_RATE)
     today = datetime.now().date()
+    if "cal_date" not in st.session_state:
+        st.session_state["cal_date"] = today
+    cal_date = st.session_state["cal_date"]
 
-    left, right = st.columns([1, 2.4])
+    cleft, cright = st.columns([1.4, 2.6])
 
-    with left:
-        cal = st.date_input("📅 날짜 선택", value=st.session_state.get("cal_date", today),
-                            max_value=today, key="cal_date_input")
-        st.session_state["cal_date"] = cal
-        date_str = cal.strftime("%Y%m%d")
-
-        # 기록 있는 날 바로가기 (DB 기반 → 기기 간 동기화)
+    with cleft:
+        # 기록 있는 날을 달력에 표시(파란 칩)
         rdates = store.record_dates()
-        if rdates:
-            with st.expander("🗓️ 기록 있는 날 바로가기"):
-                for rd in rdates[:15]:
-                    if st.button(f"{rd[:4]}-{rd[4:6]}-{rd[6:]}", key=f"rd_{rd}",
-                                 use_container_width=True):
-                        st.session_state["cal_date"] = datetime.strptime(rd, "%Y%m%d").date()
+        events = [{"start": f"{d[:4]}-{d[4:6]}-{d[6:]}", "title": "📊 기록",
+                   "allDay": True, "color": "#3182ce"} for d in rdates]
+        options = {
+            "initialView": "dayGridMonth",
+            "initialDate": cal_date.isoformat(),
+            "locale": "ko",
+            "headerToolbar": {"left": "prev,next today", "center": "title", "right": ""},
+            "height": 470,
+            "fixedWeekCount": False,
+            "selectable": True,
+        }
+        state = calendar(events=events, options=options, key="cal_widget")
+        if state and state.get("callback") == "dateClick":
+            dc = state.get("dateClick") or {}
+            clicked = (dc.get("date") or dc.get("dateStr") or "")[:10]
+            if clicked:
+                try:
+                    nd = datetime.strptime(clicked, "%Y-%m-%d").date()
+                    if nd != cal_date and nd <= today:
+                        st.session_state["cal_date"] = nd
                         st.rerun()
+                except ValueError:
+                    pass
+        st.caption(f"선택: **{cal_date:%Y-%m-%d (%a)}**  ·  📊 = 기록 있는 날")
 
-        # 그날 확인한 종목 (메모/1분봉 있는 종목)
-        st.markdown(f"**📈 {cal:%m/%d} 확인한 종목**")
+    with cright:
+        date_str = cal_date.strftime("%Y%m%d")
         recs = store.stocks_on_date(date_str)
-        if recs:
-            for r in recs:
-                badge = ("📝" if r["has_memo"] else "") + ("📊" if r["has_data"] else "")
-                if st.button(f"{r['name']} ({r['code']}) {badge}",
-                             key=f"rec_{r['code']}_{date_str}", use_container_width=True):
-                    st.session_state["view_code"] = r["code"]
-                    st.session_state["view_name"] = r["name"]
+        extras = st.session_state.get("extra_stocks", {}).get(date_str, [])
+        rec_codes = {r["code"] for r in recs}
+        stocks = recs + [e for e in extras if e["code"] not in rec_codes]
+
+        st.markdown(f"**📈 {cal_date:%m/%d (%a)} 확인한 종목**")
+        if stocks:
+            labels = [s["name"] for s in stocks] + ["➕ 새 분석"]
+            tabs = st.tabs(labels)
+            for t, s in zip(tabs[:-1], stocks):
+                with t:
+                    _render_date(s["code"], s["name"], cal_date, comm, tax)
+            with tabs[-1]:
+                _render_add_stock(date_str, [s["code"] for s in stocks])
         else:
-            st.caption("이 날 기록이 없습니다.")
+            st.info("이 날 확인한 종목이 없습니다. 아래에서 종목을 골라 분석하세요.")
+            _render_add_stock(date_str, [])
 
-        # 관심종목에서 이 날짜로 새로 분석
-        st.markdown("**⭐ 이 날짜로 새로 분석**")
-        wl = store.get_watchlist()
-        if not wl:
-            st.caption("사이드바에서 관심 종목을 추가하세요.")
-        for w in wl:
-            if st.button(f"➕ {w['name']} ({w['code']})", key=f"new_{w['code']}_{date_str}",
-                         use_container_width=True):
-                st.session_state["view_code"] = w["code"]
-                st.session_state["view_name"] = w["name"]
 
-    with right:
-        vc = st.session_state.get("view_code")
-        vn = st.session_state.get("view_name")
-        if not vc:
-            st.info("← 왼쪽에서 날짜를 고르고 종목을 클릭하면 여기에 차트·메모가 표시됩니다.")
-            return
-        head = st.columns([4, 1])
-        head[0].markdown(f"### {vn} ({vc}) — {cal:%Y-%m-%d (%a)}")
-        if head[1].button("🔄 새로고침", use_container_width=True):
-            fetch_analysis.clear()
-            st.rerun()
-        _render_date(vc, vn, cal, comm, tax)
+def _render_add_stock(date_str: str, existing: list) -> None:
+    """➕ 탭: 관심종목에서 이 날짜로 분석할 종목을 골라 추가."""
+    wl = [w for w in store.get_watchlist() if w["code"] not in existing]
+    if not wl:
+        st.caption("추가할 관심종목이 없습니다. (사이드바에서 관심 종목을 추가하세요)")
+        return
+    opts = {f"{w['name']} ({w['code']})": w for w in wl}
+    pick = st.selectbox("분석할 종목 선택", list(opts.keys()), key=f"addsel_{date_str}")
+    if st.button("이 종목 분석 추가", key=f"addbtn_{date_str}", type="primary"):
+        w = opts[pick]
+        extras = st.session_state.setdefault("extra_stocks", {})
+        extras.setdefault(date_str, []).append({"code": w["code"], "name": w["name"]})
+        st.rerun()
 
 
 def _render_date(code: str, name: str, d, comm: float, tax: float) -> None:
-    """날짜별 탭 내용: 자동 조회 → 일봉/갭/1분봉/메모."""
+    """종목 탭 내용: 자동 조회 → 일봉/갭/1분봉/메모."""
     date_str = d.strftime("%Y%m%d")
     is_today = date_str == datetime.now().strftime("%Y%m%d")
+
+    h = st.columns([4, 1])
+    h[0].markdown(f"##### {name} ({code}) · {d:%Y-%m-%d}")
+    if h[1].button("🔄 새로고침", key=f"refresh_{code}_{date_str}", use_container_width=True):
+        fetch_analysis.clear()
+        st.rerun()
 
     data = fetch_analysis(code, name, date_str, is_today)
     if data["error"]:
