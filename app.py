@@ -196,7 +196,7 @@ def tab_analysis() -> None:
 
         st.markdown(f"**📈 {cal_date:%m/%d (%a)} 확인한 종목**")
         if stocks:
-            labels = [s["name"] for s in stocks] + ["➕ 새 분석"]
+            labels = [f"{s['name']}{' 📊' if s.get('has_data') else ''}" for s in stocks] + ["➕ 새 분석"]
             tabs = st.tabs(labels)
             for t, s in zip(tabs[:-1], stocks):
                 with t:
@@ -209,18 +209,19 @@ def tab_analysis() -> None:
 
 
 def _render_add_stock(date_str: str, existing: list) -> None:
-    """➕ 탭: 관심종목에서 이 날짜로 분석할 종목을 골라 추가."""
+    """관심종목을 눌러 이 날짜로 분석/추가 (원클릭)."""
     wl = [w for w in store.get_watchlist() if w["code"] not in existing]
     if not wl:
         st.caption("추가할 관심종목이 없습니다. (사이드바에서 관심 종목을 추가하세요)")
         return
-    opts = {f"{w['name']} ({w['code']})": w for w in wl}
-    pick = st.selectbox("분석할 종목 선택", list(opts.keys()), key=f"addsel_{date_str}")
-    if st.button("이 종목 분석 추가", key=f"addbtn_{date_str}", type="primary"):
-        w = opts[pick]
-        extras = st.session_state.setdefault("extra_stocks", {})
-        extras.setdefault(date_str, []).append({"code": w["code"], "name": w["name"]})
-        st.rerun()
+    st.caption("관심종목을 눌러 이 날짜로 분석 (분석 시 자동 저장):")
+    cols = st.columns(2)
+    for i, w in enumerate(wl):
+        if cols[i % 2].button(f"▶ {w['name']} ({w['code']})",
+                              key=f"add_{w['code']}_{date_str}", use_container_width=True):
+            extras = st.session_state.setdefault("extra_stocks", {})
+            extras.setdefault(date_str, []).append({"code": w["code"], "name": w["name"]})
+            st.rerun()
 
 
 def _render_date(code: str, name: str, d, comm: float, tax: float) -> None:
