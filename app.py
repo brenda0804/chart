@@ -157,6 +157,11 @@ def tab_analysis() -> None:
     cleft, cright = st.columns([1.4, 2.6])
 
     with cleft:
+        if st.button("📅 오늘로", use_container_width=True):
+            if cal_date != today:
+                st.session_state["cal_date"] = today
+                st.rerun()
+
         # 기록 있는 날을 달력에 표시(파란 칩)
         rdates = store.record_dates()
         events = [{"start": f"{d[:4]}-{d[4:6]}-{d[6:]}", "title": "📊 기록",
@@ -165,7 +170,7 @@ def tab_analysis() -> None:
             "initialView": "dayGridMonth",
             "initialDate": cal_date.isoformat(),
             "locale": "ko",
-            "headerToolbar": {"left": "prev,next today", "center": "title", "right": ""},
+            "headerToolbar": {"left": "prev,next", "center": "title", "right": ""},
             "height": 470,
             "fixedWeekCount": False,
             "selectable": True,
@@ -497,7 +502,25 @@ def tab_journal() -> None:
 
 
 # ---- 메인 ----------------------------------------------------------------
+_RESPONSIVE_CSS = """
+<style>
+.block-container { padding-top: 1.2rem; }
+/* 모바일: 여백 축소, 글씨 가독성, 탭 가로 스크롤 */
+@media (max-width: 640px) {
+  .block-container { padding: 0.6rem 0.6rem 3rem !important; }
+  h1,h2,h3,h4 { line-height: 1.25 !important; }
+  [data-testid="stMetricValue"] { font-size: 1.05rem !important; }
+  [data-testid="stMetricLabel"] p { font-size: 0.72rem !important; }
+  [data-testid="stMetricDelta"] { font-size: 0.72rem !important; }
+  [data-baseweb="tab-list"] { overflow-x: auto !important; flex-wrap: nowrap !important; }
+  [data-testid="stCaptionContainer"] { font-size: 0.8rem !important; }
+}
+</style>
+"""
+
+
 def main() -> None:
+    st.markdown(_RESPONSIVE_CSS, unsafe_allow_html=True)
     sidebar_watchlist()
     tab1, tab2 = st.tabs(["차트 분석 & 메모", "종합 매매일지"])
     with tab1:
