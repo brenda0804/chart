@@ -8,7 +8,7 @@ from pathlib import Path
 import streamlit as st
 from streamlit_calendar import calendar
 
-from src import kis_client, store, charting, symbols, signals, realtime_ws
+from src import kis_client, store, charting, symbols, signals, realtime_ws, plan
 
 st.set_page_config(page_title="단타 매매일지 대시보드", page_icon="📈", layout="wide")
 
@@ -343,6 +343,56 @@ def _render_minute_section(name: str, code: str, date_str: str, df_min,
     # 실시간 모니터는 '오늘' 탭에서만 (장중 실시간 대상)
     if is_today:
         _render_realtime(name, code, date_str, df_min, comm, tax)
+
+    _render_plan(name, code, df_min, comm, tax, is_today)
+
+
+def _render_plan(name: str, code: str, df_min, comm: float, tax: float, is_today: bool) -> None:
+    """📋 매매 플랜(규칙 기반) + 과거 근거. 모바일 우선(세로 카드/표)."""
+    if df_min is None or df_min.empty:
+        return
+    ref = float(df_min["Close"].iloc[-1])
+    vol = signals.volatility_pct(df_min)
+    p = plan.trading_plan(ref, commission_rate=comm, tax_rate=tax, vol_pct=vol)
+    lv, pr = p["levels"], p["prices"]
+
+    st.divider()
+    st.markdown("#### 📋 매매 플랜 · 참고용(예측·투자자문 아님)")
+
+    tbl = pd.DataFrame([
+        {"단계": "🔴 손절", "가격": f"{pr['stop']:,.0f}", "기준대비": f"-{lv['stop']:.1f}%", "액션": "전량 매도"},
+        {"단계": "🟠 추매", "가격": f"{pr['add']:,.0f}", "기준대비": f"-{lv['add']:.1f}%", "액션": "매수(평단↓)"},
+        {"단계": "⚪ 진입", "가격": f"{pr['entry']:,.0f}", "기준대비": "0%", "액션": "매수"},
+        {"단계": "🟢 익절1", "가격": f"{pr['tp1']:,.0f}", "기준대비": f"+{lv['tp1']:.1f}%", "액션": "절반 매도"},
+        {"단계": "🟢 익절2", "가격": f"{pr['tp2']:,.0f}", "기준대비": f"+{lv['tp2']:.1f}%", "액션": "나머지 매도"},
+    ])
+    st.dataframe(tbl, hide_index=True, use_container_width=True)
+
+    c = st.columns(2)
+    c[0].metric("계획 성공 시(익절1·2)", f"{p['net_win']:+,.0f}원", f"{p['ret_win']:+.2f}%")
+    c[1].metric("손절 시", f"{p['net_loss']:+,.0f}원", f"{p['ret_loss']:+.2f}%",
+                delta_color="inverse")
+    st.caption(
+        f"기준가 {ref:,.0f}원 · 1천만원({p['shares']:,}주) 기준 · 레벨은 변동성"
+        f"({vol:.2f}%/분)으로 자동 산정 · 손익비 {p['rr']:.1f}"
+    )
+
+    # 과거 근거 (오늘, 같은 시각 이후 30분 실제 수익률 분포)
+    if is_today:
+        st.markdown("##### 📚 과거 근거 · 같은 시각 이후 30분 (실제 데이터)")
+        stats = plan.historical_forward_stats(
+            code, datetime.now().time(), today_str=datetime.now().strftime("%Y%m%d"))
+        if stats:
+            s = st.columns(3)
+            s[0].metric("표본", f"{stats['n']}일")
+            s[1].metric("중앙 수익률", f"{stats['median']:+.2f}%")
+            s[2].metric("상승 비율", f"{stats['win_rate']:.0f}%")
+            st.caption(
+                f"과거 {stats['n']}일 중 현재 시각 이후 30분 수익률 범위 "
+                f"[{stats['min']:+.2f}% ~ {stats['max']:+.2f}%]. 표본이 적으면 참고만 하세요(예측 아님)."
+            )
+        else:
+            st.caption("과거 데이터가 부족합니다. 며칠 더 기록이 쌓이면 통계가 표시됩니다.")
 
 
 def _render_realtime(name: str, code: str, date_str: str, df_min,
