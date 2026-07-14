@@ -15,17 +15,27 @@ from . import config
 # 토큰 캐시 파일 (.gitignore 에 의해 커밋 안 됨)
 _TOKEN_CACHE = Path(__file__).resolve().parent.parent / "token.json"
 
-# ---- 트래픽 제어 (초당 호출제한 회피) ------------------------------------
-_MIN_INTERVAL = 0.30  # 호출 간 최소 간격(초). 모의투자는 특히 제한이 빡빡함
+# ---- 트래픽 제어 (초당 호출제한 회피 + 제한적 병렬 허용) ------------------
+import threading
+
+_MIN_INTERVAL = 0.15          # 호출 시작 간 최소 간격(초)
+_MAX_CONCURRENT = 3           # 동시 in-flight 요청 상한
+_sema = threading.Semaphore(_MAX_CONCURRENT)
+_interval_lock = threading.Lock()
 _last_call_at = [0.0]
 
 
 def _throttle() -> None:
-    """직전 호출과 최소 간격을 유지하도록 대기."""
-    elapsed = time.time() - _last_call_at[0]
-    if elapsed < _MIN_INTERVAL:
-        time.sleep(_MIN_INTERVAL - elapsed)
-    _last_call_at[0] = time.time()
+    """호출 시작 시각을 _MIN_INTERVAL 간격으로 스케줄링(스레드 세이프).
+
+    lock 안에서 다음 슬롯만 예약하고 sleep은 밖에서 → 스레드들이 계단식으로 진행.
+    """
+    with _interval_lock:
+        nxt = max(time.time(), _last_call_at[0] + _MIN_INTERVAL)
+        _last_call_at[0] = nxt
+    delay = nxt - time.time()
+    if delay > 0:
+        time.sleep(delay)
 
 
 # ---- 토큰 ----------------------------------------------------------------
@@ -90,7 +100,8 @@ def _get(url: str, tr_id: str, params: dict, retries: int = 3) -> dict:
     for attempt in range(retries):
         _throttle()
         try:
-            resp = requests.get(url, headers=_headers(tr_id), params=params, timeout=10)
+            with _sema:  # 동시 요청 수 제한
+                resp = requests.get(url, headers=_headers(tr_id), params=params, timeout=10)
         except requests.RequestException:
             time.sleep(0.5)
             continue

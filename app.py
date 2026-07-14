@@ -2,9 +2,13 @@
 
 실행:  streamlit run app.py
 """
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 from streamlit_calendar import calendar
 
@@ -91,9 +95,13 @@ def _sidebar_fee_settings() -> None:
 
 
 # ---- 탭 1: 차트 분석 & 메모 ----------------------------------------------
-@st.cache_data(ttl=60, show_spinner="조회 중...")
-def fetch_analysis(code: str, name: str, date_str: str, is_today: bool) -> dict:
-    """(종목,날짜) 데이터 조회 — 캐시로 중복 호출 방지. [새로고침]이 캐시를 비운다."""
+# (종목,날짜) 조회 결과 캐시 — 스레드에서 호출 가능(병렬 프리페치용). st.cache_data 대신 모듈 캐시.
+_ANALYSIS_CACHE: dict = {}
+_ANALYSIS_LOCK = threading.Lock()
+_ANALYSIS_TTL = 60  # 초
+
+
+def _fetch_raw(code: str, name: str, date_str: str, is_today: bool) -> dict:
     res = {"df_daily": None, "investor": None, "df_min": None, "clip_note": "", "error": ""}
     try:
         end = datetime.now()
@@ -103,15 +111,13 @@ def fetch_analysis(code: str, name: str, date_str: str, is_today: bool) -> dict:
         res["df_daily"] = charting.daily_to_df(daily_rows) if daily_rows else None
         res["investor"] = charting.investor_to_df(kis_client.get_investor_trend(code))
         if is_today:
-            min_rows = kis_client.get_minute_chart(code)
+            now = datetime.now()
+            # 오늘은 현재 시각까지만 페이지네이션 → 콜 수 대폭 감소
+            min_rows = kis_client.get_minute_chart(code, to_hour=now.strftime("%H%M%S"))
             if min_rows:
                 dfm = charting.minute_to_df(min_rows, date_str)
-                now = datetime.now()
-                before = len(dfm)
                 dfm = dfm[dfm.index <= now]  # 미래 캔들 제거
-                if len(dfm) < before:
-                    res["clip_note"] = (f"장중이라 현재({now:%H:%M})까지 {len(dfm)}개만 표시"
-                                        "(미래 캔들 제외). 전체 복기는 장 마감 후.")
+                res["clip_note"] = f"현재({now:%H:%M})까지 {len(dfm)}개 캔들 (장 마감 후 전체 복기)."
                 if not dfm.empty:
                     store.save_minute_data(code, name, date_str, dfm)
                 res["df_min"] = dfm
@@ -122,6 +128,41 @@ def fetch_analysis(code: str, name: str, date_str: str, is_today: bool) -> dict:
     except Exception as e:  # noqa: BLE001
         res["error"] = f"조회 오류: {e}"
     return res
+
+
+def fetch_analysis(code: str, name: str, date_str: str, is_today: bool) -> dict:
+    """(종목,날짜) 조회 (TTL 캐시). 스레드에서 호출 가능."""
+    key = (code, date_str, is_today)
+    now = time.time()
+    with _ANALYSIS_LOCK:
+        hit = _ANALYSIS_CACHE.get(key)
+    if hit and now - hit[0] < _ANALYSIS_TTL:
+        return hit[1]
+    res = _fetch_raw(code, name, date_str, is_today)
+    with _ANALYSIS_LOCK:
+        _ANALYSIS_CACHE[key] = (now, res)
+    return res
+
+
+def fetch_analysis_clear() -> None:
+    with _ANALYSIS_LOCK:
+        _ANALYSIS_CACHE.clear()
+
+
+def _prefetch(stocks: list, date_str: str, is_today: bool) -> None:
+    """여러 종목을 병렬로 미리 조회해 캐시를 워밍(탭 렌더 전)."""
+    uniq = {s["code"]: s for s in stocks}.values()
+    if len(uniq) <= 1:
+        return
+    with st.spinner(f"{len(uniq)}개 종목 병렬 조회 중..."):
+        with ThreadPoolExecutor(max_workers=min(4, len(uniq))) as ex:
+            futs = [ex.submit(fetch_analysis, s["code"], s["name"], date_str, is_today)
+                    for s in uniq]
+            for f in futs:
+                try:
+                    f.result()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 def _calendar_clicked_date(state) -> str | None:
@@ -196,6 +237,7 @@ def tab_analysis() -> None:
 
         st.markdown(f"**📈 {cal_date:%m/%d (%a)} 확인한 종목**")
         if stocks:
+            _prefetch(stocks, date_str, date_str == today.strftime("%Y%m%d"))
             labels = [f"{s['name']}{' 📊' if s.get('has_data') else ''}" for s in stocks] + ["➕ 새 분석"]
             tabs = st.tabs(labels)
             for t, s in zip(tabs[:-1], stocks):
@@ -232,10 +274,11 @@ def _render_date(code: str, name: str, d, comm: float, tax: float) -> None:
     h = st.columns([4, 1])
     h[0].markdown(f"##### {name} ({code}) · {d:%Y-%m-%d}")
     if h[1].button("🔄 새로고침", key=f"refresh_{code}_{date_str}", use_container_width=True):
-        fetch_analysis.clear()
+        fetch_analysis_clear()
         st.rerun()
 
-    data = fetch_analysis(code, name, date_str, is_today)
+    with st.spinner("조회 중..."):
+        data = fetch_analysis(code, name, date_str, is_today)
     if data["error"]:
         st.error(data["error"])
         return
