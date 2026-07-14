@@ -398,9 +398,19 @@ def _render_realtime(name: str, code: str, date_str: str, df_min,
             st.warning("현재가를 가져오지 못했습니다(장외/휴장일 수 있음).")
             return
 
-        sigs = signals.technical_signals(df_min, current_price=cur)
+        # 실시간 캔들: WS 틱 → 1분봉 집계 → 과거+실시간 병합 (매 갱신마다 성장)
+        df_view = df_min
+        live_note = ""
+        if ws_on:
+            th = realtime_ws.tick_history(code)
+            if th:
+                lc = charting.live_candles(th, datetime.now().strftime("%Y%m%d"))
+                df_view = charting.merge_live(df_min, lc)
+                live_note = f" · 실시간 캔들 {len(lc)}분"
+
+        sigs = signals.technical_signals(df_view, current_price=cur)
         verdict = signals.timing_verdict(sigs)
-        sc = signals.scenario(df_min, cur, commission_rate=comm, tax_rate=tax,
+        sc = signals.scenario(df_view, cur, commission_rate=comm, tax_rate=tax,
                               target_pct=tp, stop_pct=sp)
 
         m = st.columns(3)
@@ -421,14 +431,14 @@ def _render_realtime(name: str, code: str, date_str: str, df_min,
         else:
             st.caption("현재 특이 신호 없음 (20분 이상 데이터 필요)")
 
-        recent = df_min.tail(60)  # 최근 60분 + 목표/손절 투영
+        recent = df_view.tail(60)  # 최근 60분(실시간 병합) + 목표/손절 투영
         st.plotly_chart(
             charting.build_minute_figure(name, code, recent.index[-1].strftime("%Y%m%d"),
                                          recent, None, scenario=sc),
             use_container_width=True, key=f"rtchart_{k}",
         )
         st.caption(
-            f"⏱️ 갱신 {datetime.now():%H:%M:%S} · 목표/손절선은 변동성 기반 **시나리오**이며 "
+            f"⏱️ 갱신 {datetime.now():%H:%M:%S}{live_note} · 목표/손절선은 변동성 기반 **시나리오**이며 "
             "미래 가격 예측이 아닙니다. 실제 매매 판단·책임은 본인에게 있습니다."
         )
 

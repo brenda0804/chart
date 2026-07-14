@@ -170,6 +170,39 @@ def gap_info(df_daily: pd.DataFrame, date_str: str, capital: int = CAPITAL,
     }
 
 
+def live_candles(ticks: list, date_str: str) -> pd.DataFrame:
+    """실시간 틱 [(HHMMSS, price, vol)] → 1분봉 OHLCV DataFrame."""
+    if not ticks:
+        return pd.DataFrame()
+    agg: dict[str, dict] = {}
+    for t, p, v in ticks:
+        m = t[:4]  # HHMM 단위 그룹
+        if m not in agg:
+            agg[m] = {"o": p, "h": p, "l": p, "c": p, "v": v}
+        else:
+            r = agg[m]
+            r["h"] = max(r["h"], p)
+            r["l"] = min(r["l"], p)
+            r["c"] = p
+            r["v"] += v
+    rows = []
+    for m, r in agg.items():
+        ts = pd.to_datetime(date_str + m + "00", format="%Y%m%d%H%M%S")
+        rows.append((ts, r["o"], r["h"], r["l"], r["c"], r["v"]))
+    df = pd.DataFrame(rows, columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+    return df.set_index("Date").sort_index()
+
+
+def merge_live(hist: pd.DataFrame, live: pd.DataFrame) -> pd.DataFrame:
+    """과거 1분봉 + 실시간 집계 캔들 병합(겹치는 분은 실시간 우선)."""
+    if live is None or live.empty:
+        return hist
+    if hist is None or hist.empty:
+        return live
+    cut = live.index.min()
+    return pd.concat([hist[hist.index < cut], live]).sort_index()
+
+
 # ---- Plotly 차트 ----------------------------------------------------------
 def _ma(series: pd.Series, n: int) -> pd.Series:
     return series.rolling(n).mean()

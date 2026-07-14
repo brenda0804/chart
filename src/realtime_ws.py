@@ -10,6 +10,7 @@ tr_id H0STCNT0 = 국내주식 실시간 체결가.
 import json
 import threading
 import time
+from collections import deque
 
 import requests
 
@@ -43,7 +44,8 @@ def get_approval_key() -> str:
 
 class _Stream:
     def __init__(self) -> None:
-        self.ticks: dict[str, dict] = {}
+        self.ticks: dict[str, dict] = {}          # 최신 틱
+        self.buffers: dict[str, deque] = {}       # 틱 히스토리 (실시간 캔들 집계용)
         self.app = None
         self.thread: threading.Thread | None = None
         self.code: str | None = None
@@ -70,13 +72,17 @@ class _Stream:
             parts = data.split("|")
             if len(parts) >= 4 and parts[1] == "H0STCNT0":
                 f = parts[3].split("^")
-                if len(f) > 5:
+                if len(f) > 12:
                     try:
+                        t, price = f[1], float(f[2])
+                        vol = float(f[12])  # 체결 거래량(CNTG_VOL)
                         with self.lock:
                             self.ticks[self.code] = {
-                                "price": float(f[2]), "time": f[1],
+                                "price": price, "time": t,
                                 "chg_pct": float(f[5]), "at": time.time(),
                             }
+                            buf = self.buffers.setdefault(self.code, deque(maxlen=8000))
+                            buf.append((t, price, vol))
                     except (ValueError, IndexError):
                         pass
             return
@@ -124,6 +130,10 @@ class _Stream:
         with self.lock:
             return self.ticks.get(code)
 
+    def tick_history(self, code: str) -> list:
+        with self.lock:
+            return list(self.buffers.get(code, ()))
+
 
 _stream = _Stream()
 
@@ -138,6 +148,11 @@ def stop_stream() -> None:
 
 def latest_tick(code: str) -> dict | None:
     return _stream.latest(code)
+
+
+def tick_history(code: str) -> list:
+    """실시간 캔들 집계용 틱 히스토리 [(HHMMSS, price, vol), ...]."""
+    return _stream.tick_history(code)
 
 
 def status() -> dict:
